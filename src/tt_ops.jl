@@ -80,9 +80,18 @@ end
 -(a::TTTensor, b::TTTensor) = a + (-one(eltype(a.cores[1])) * b)
 -(a::TTMatrix, b::TTMatrix) = a + (-one(eltype(a.cores[1])) * b)
 
-*(a::TTTensor, α::Number) = TTTensor([core .* α for core in a.cores])
+function *(a::TTTensor, α::Number)
+    cores = [copy(core) for core in a.cores]
+    cores[1] = cores[1] .* α
+    return TTTensor(cores)
+end
 *(α::Number, a::TTTensor) = a * α
-*(a::TTMatrix, α::Number) = TTMatrix([core .* α for core in a.cores])
+
+function *(a::TTMatrix, α::Number)
+    cores = [copy(core) for core in a.cores]
+    cores[1] = cores[1] .* α
+    return TTMatrix(cores)
+end
 *(α::Number, a::TTMatrix) = a * α
 
 function +(a::TTTensor, α::Number)

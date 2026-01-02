@@ -85,6 +85,17 @@ function parse_matrix(A, n::Vector{Int}, X::Matrix{Any}, t, vectype)
         As[d + 1, k] = -As[d + 1, k]
     end
 
+    # Set up time identity block for the identity matrix column
+    T = As[1, 1] === nothing ? Float64 : eltype(As[1, 1])
+    As[d + 1, Ra + 1] = Matrix{T}(I, n[d + 1], n[d + 1])
+    if n[d + 1] > 1
+        As[d + 1, Ra + 1] = reshape(As[d + 1, Ra + 1], ras[d + 1, Ra + 1] * n[d + 1], n[d + 1])
+        As[d + 1, Ra + 1] = sparse(As[d + 1, Ra + 1])
+    else
+        As[d + 1, Ra + 1] = reshape(As[d + 1, Ra + 1], ras[d + 1, Ra + 1], 1, 1)
+    end
+    As[d + 1, Ra + 1] = -As[d + 1, Ra + 1]
+
     return As, Ra, ras
 end
 
@@ -250,16 +261,18 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing)
             error("Crank-Nicolson scheme requires odd number of time points")
         end
         nt = n[d + 1]
-        w = fill(0.5 / (nt - 1), nt)
-        Mt = spdiagm(-1 => w, 0 => w)
+        w0 = fill(0.5 / (nt - 1), nt)
+        w1 = fill(0.5 / (nt - 1), nt - 1)
+        Mt = spdiagm(nt, nt, -1 => w1, 0 => w0)
         Mt[1, 1] = 0
-        Gt = spdiagm(-1 => fill(-1.0, nt), 0 => fill(1.0, nt))
+        Gt = spdiagm(nt, nt, -1 => fill(-1.0, nt - 1), 0 => fill(1.0, nt))
         rhst = reshape([1.0; zeros(nt - 1)], 1, nt, 1, 1)
         t_coarse = collect(0:(nt - 1)) / (nt - 1)
-        w2 = fill(0.25 / (nt - 1), 2 * nt - 1)
-        Mt2 = spdiagm(-1 => w2, 0 => w2)
+        w20 = fill(0.25 / (nt - 1), 2 * nt - 1)
+        w21 = fill(0.25 / (nt - 1), 2 * nt - 2)
+        Mt2 = spdiagm(2 * nt - 1, 2 * nt - 1, -1 => w21, 0 => w20)
         Mt2[1, 1] = 0
-        Gt2 = spdiagm(-1 => fill(-1.0, 2 * nt - 1), 0 => fill(1.0, 2 * nt - 1))
+        Gt2 = spdiagm(2 * nt - 1, 2 * nt - 1, -1 => fill(-1.0, 2 * nt - 2), 0 => fill(1.0, 2 * nt - 1))
     else
         error("Only Chebyshev and CN schemes are implemented")
     end
@@ -310,6 +323,7 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing)
                     As[d + 1, k] = Mt * As[d + 1, k]
                     As[d + 1, k] = reshape(As[d + 1, k], n[d + 1] * n[d + 1], ras[d + 1, k])
                     As[d + 1, k] = reshape(As[d + 1, k]', ras[d + 1, k] * n[d + 1], n[d + 1])
+                    As[d + 1, k] = sparse(As[d + 1, k])
                 end
                 As[d + 1, Ra + 1] = Gt
                 if Rrhs > 0
@@ -325,38 +339,11 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing)
                 rfs = vcat([size(x0[i, 1], 1) for i in 1:(d + 1)], 1)
             end
 
-            if ZAX !== nothing
-                for k in 1:Ra
-                    for i in 1:(d + 1)
-                        if ZAX[k, i] === nothing
-                            continue
-                        end
-                        rprev = size(ZAX[k, i], 3)
-                        rnew = ras[i, k]
-                        if rprev < rnew
-                            ZAX[k, i] = cat(ZAX[k, i], zeros(eltype(ZAX[k, i]), size(ZAX[k, i], 1), size(ZAX[k, i], 2), rnew - rprev); dims=3)
-                        elseif rprev > rnew
-                            ZAX[k, i] = ZAX[k, i][:, :, 1:rnew]
-                        end
-                    end
-                end
-            end
-            if ZY !== nothing
-                for k in 1:Rrhs
-                    for i in 1:(d + 1)
-                        if ZY[k, i] === nothing
-                            continue
-                        end
-                        rprev = size(ZY[k, i], 2)
-                        rnew = rfs[i, k]
-                        if rprev < rnew
-                            ZY[k, i] = hcat(ZY[k, i], zeros(eltype(ZY[k, i]), size(ZY[k, i], 1), rnew - rprev))
-                        elseif rprev > rnew
-                            ZY[k, i] = ZY[k, i][:, 1:rnew]
-                        end
-                    end
-                end
-            end
+            # Reset ZAX and ZY for each sweep to avoid dimension mismatch issues
+            # when rz or rx changes between sweeps
+            # This is less efficient than reusing projections, but more robust
+            ZAX = nothing
+            ZY = nothing
 
             X, rx, z, ZAX, ZY, opts, errs, resids, XAX, XY, XAUX = amenany_sweep(X, As, x0rhs, z, tol, opts, ZAX, ZY, Aux)
             max_err = maximum(errs)
@@ -404,7 +391,7 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing)
                 end
                 yt = reshape(yt, rx[d + 1] * n[d + 1], 1)
                 xt = AT \ yt
-                X[d + 1, 1] = reshape(xt, rx[d + 1], n[d + 1])
+                X[d + 1, 1] = reshape(xt, rx[d + 1], n[d + 1], 1, 1)
 
                 AT2 = kron(P, Matrix(I, rx[d + 1], rx[d + 1])) + kron(iSt2, Matrix(I, rx[d + 1], rx[d + 1])) * At
                 yt = repeat(u0, 1, 2 * n[d + 1])
@@ -418,7 +405,7 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing)
                 yt = reshape(yt, rx[d + 1] * n[d + 1] * 2, 1)
                 time_resid = norm(AT2 * xt - yt) / norm(yt)
             else
-                At = spzeros(rx[d + 1] * n[d + 1], rx[d + 1] * n[d + 1])
+                At = spzeros(ComplexF64, rx[d + 1] * n[d + 1], rx[d + 1] * n[d + 1])
                 for k in 1:Ra
                     At2 = As_true[k]
                     if ras[d + 1, k] > 1
@@ -427,13 +414,17 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing)
                             At .+= kron(reshape(At2[j, :], n[d + 1], n[d + 1]), sparse(XAX[k, d + 1][:, :, j]))
                         end
                     else
-                        At .+= kron(At2, sparse(XAX[k, d + 1]))
+                        XAXk = XAX[k, d + 1]
+                        if ndims(XAXk) == 3
+                            XAXk = XAXk[:, :, 1]
+                        end
+                        At .+= kron(At2, sparse(XAXk))
                     end
                 end
                 AT = kron(Gt, spdiagm(0 => ones(rx[d + 1]))) + kron(Mt, spdiagm(0 => ones(rx[d + 1]))) * At
                 yt = vcat(u0, zeros(eltype(u0), rx[d + 1] * (n[d + 1] - 1)))
                 xt = AT \ yt
-                X[d + 1, 1] = reshape(xt, rx[d + 1], n[d + 1])
+                X[d + 1, 1] = reshape(xt, rx[d + 1], n[d + 1], 1, 1)
 
                 xt2 = At * xt
                 xt2 = reshape(xt2, rx[d + 1], n[d + 1])

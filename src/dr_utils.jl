@@ -194,7 +194,7 @@ function dot_dR(x, y)
             for i in 1:d
                 xcore = reshape(x_cells[i, k], rx[i, k], n[i], rx[i + 1, k])
                 ycore = reshape(y_cells[i, m], ry[i, m], n[i], ry[i + 1, m])
-                @tensor Skm2[rxp, ryp] := Skm[rx, ry] * xcore[rx, n_i, rxp] * ycore[ry, n_i, ryp]
+                @tensor Skm2[rxp, ryp] := Skm[rx, ry] * conj(xcore[rx, n_i, rxp]) * ycore[ry, n_i, ryp]
                 Skm = Skm2
             end
             S += Skm[1, 1]

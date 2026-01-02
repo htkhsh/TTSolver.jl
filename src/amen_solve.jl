@@ -114,6 +114,7 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
     _, _, Rz, rz = check_vector(z, "z"; d=d, n=n)
     _, _, Raux, raux = check_vector(aux, "o")
 
+
     loctol = tol / sqrt(d)
 
     get!(opts, :resid_damp, 4)
@@ -158,8 +159,8 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
     if ZAX === nothing
         ZAX = similar(XAX)
         for k in 1:Ra
-            ZAX[k, 1] = ones(T, 1, 1, 1)
-            ZAX[k, d + 1] = ones(T, 1, 1, 1)
+            ZAX[k, 1] = ones(T, 1, 1, ra[1, k])
+            ZAX[k, d + 1] = ones(T, 1, 1, ra[d + 1, k])
             for i in 2:d
                 ZAX[k, i] = nothing
             end
