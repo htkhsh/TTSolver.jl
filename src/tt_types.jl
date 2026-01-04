@@ -1,3 +1,7 @@
+# TT形式の規約:
+# 外部API: TTTensor([c1, c2, ..., cd]) は kron(c1, kron(c2, ..., cd)) に対応
+# 内部保存: そのまま保存、tt_full で kron 互換の順序に変換
+
 struct TTTensor{T}
     cores::Vector{Array{T,3}}
 end
@@ -6,6 +10,24 @@ struct TTMatrix{T}
     cores::Vector{Array{T,4}}
 end
 
+"""
+    TTTensor(cores)
+
+Create a TT-tensor from a list of 3D cores.
+
+The cores should be ordered as `[c1, c2, ..., cd]` where each `ci` has shape
+`(r_{i-1}, n_i, r_i)`. This corresponds to `kron(c1, kron(c2, ..., cd))` when
+converted to full format via `tt_full`.
+
+# Example
+```julia
+v1, v2 = [1.0, 2.0], [1.0, 2.0, 3.0]
+c1 = reshape(v1, 1, 2, 1)
+c2 = reshape(v2, 1, 3, 1)
+tt = TTTensor([c1, c2])
+tt_full(tt) == kron(v1, v2)  # true
+```
+"""
 function TTTensor(cores::Vector{<:Array})
     isempty(cores) && error("TTTensor cores must be non-empty")
     first_core = cores[1]
@@ -23,6 +45,15 @@ function TTTensor(cores::Vector{<:Array})
     return TTTensor{T}(typed)
 end
 
+"""
+    TTMatrix(cores)
+
+Create a TT-matrix from a list of 4D cores.
+
+The cores should be ordered as `[c1, c2, ..., cd]` where each `ci` has shape
+`(r_{i-1}, n_i, m_i, r_i)`. This corresponds to `kron(c1, kron(c2, ..., cd))`
+when converted to full format via `tt_full`.
+"""
 function TTMatrix(cores::Vector{<:Array})
     isempty(cores) && error("TTMatrix cores must be non-empty")
     first_core = cores[1]
@@ -40,16 +71,31 @@ function TTMatrix(cores::Vector{<:Array})
     return TTMatrix{T}(typed)
 end
 
+"""
+    tt_dims(tt::TTTensor)
+
+Return the mode sizes `[n1, n2, ..., nd]` of the TT-tensor.
+"""
 function tt_dims(tt::TTTensor)
     return [size(core, 2) for core in tt.cores]
 end
 
+"""
+    tt_dims(tt::TTMatrix)
+
+Return the row and column mode sizes `([n1,...,nd], [m1,...,md])` of the TT-matrix.
+"""
 function tt_dims(tt::TTMatrix)
     n = [size(core, 2) for core in tt.cores]
     m = [size(core, 3) for core in tt.cores]
     return n, m
 end
 
+"""
+    tt_ranks(tt::TTTensor)
+
+Return the TT-ranks `[r0, r1, ..., rd]` of the TT-tensor.
+"""
 function tt_ranks(tt::TTTensor)
     d = length(tt.cores)
     r = Vector{Int}(undef, d + 1)
@@ -60,6 +106,11 @@ function tt_ranks(tt::TTTensor)
     return r
 end
 
+"""
+    tt_ranks(tt::TTMatrix)
+
+Return the TT-ranks `[r0, r1, ..., rd]` of the TT-matrix.
+"""
 function tt_ranks(tt::TTMatrix)
     d = length(tt.cores)
     r = Vector{Int}(undef, d + 1)
@@ -70,10 +121,20 @@ function tt_ranks(tt::TTMatrix)
     return r
 end
 
+"""
+    core2cell(tt::TTTensor)
+
+Return a copy of the TT cores as a vector of 3D arrays.
+"""
 function core2cell(tt::TTTensor)
     return copy(tt.cores)
 end
 
+"""
+    core2cell(tt::TTMatrix)
+
+Return a copy of the TT cores as a vector of 4D arrays.
+"""
 function core2cell(tt::TTMatrix)
     return copy(tt.cores)
 end

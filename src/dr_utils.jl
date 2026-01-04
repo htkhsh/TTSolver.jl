@@ -178,7 +178,7 @@ function dr_from_tt_tensor(x::TTTensor)
     return cores
 end
 
-function dot_dR(x, y)
+function tt_dot(x, y)
     d, n, Rx, rx, xtype = check_vector(x, "x")
     dy, ny, Ry, ry, ytype = check_vector(y, "y")
     d == dy || error("Sizes of x and y should be the same")
@@ -203,17 +203,58 @@ function dot_dR(x, y)
     return S
 end
 
-function expand_dR(y)
-    d, n, Ry, ry, ytype = check_vector(y, "y")
-    m = ones(Int, d)
+"""
+    tt_full(x::TTTensor)
 
-    y_cells = ytype == :tt_tensor ? dr_from_tt_tensor(y) : y
-    if ytype != :tt_tensor
-        for i in 1:d
-            core = y_cells[i, 1]
-            core isa SparseMatrixCSC && error("Expansion of sparse matrices is not allowed yet")
-            m[i] = size(core, 3)
-        end
+Expand a TT-tensor to a full dense array with shape `(n1, n2, ..., nd)`.
+
+The result is compatible with Julia's `kron` function:
+`tt_full(TTTensor([c1, c2, ..., cd]))` equals `kron(c1, kron(c2, ..., cd))` when
+flattened.
+"""
+function tt_full(y::TTTensor{T}) where T
+    d = length(y.cores)
+    n = tt_dims(y)
+    
+    # Contract cores sequentially (little-endian order internally)
+    result = ones(T, 1, 1)
+    ncum = 1
+    
+    for i in 1:d
+        core = y.cores[i]  # r1 × ni × r2
+        r1, ni, r2 = size(core)
+        
+        # Contract with previous result
+        core_mat = reshape(core, r1, ni * r2)
+        result = result * core_mat  # ncum × (ni * r2)
+        
+        # Reshape to separate ni
+        ncum *= ni
+        result = reshape(result, ncum, r2)
+    end
+    
+    # Reshape and permute to kron-compatible order (big-endian)
+    # Internal contraction gives little-endian: fastest varying index is n[1]
+    # kron expects big-endian: fastest varying index is n[d]
+    result_arr = reshape(result, n...)
+    result_arr = permutedims(result_arr, d:-1:1)  # reverse dimension order
+    return result_arr
+end
+
+# Fallback for dR format (cell array)
+function tt_full(y)
+    d, n, Ry, ry, ytype = check_vector(y, "y")
+    
+    if ytype == :tt_tensor
+        return tt_full(y)  # Use the optimized version
+    end
+    
+    m = ones(Int, d)
+    y_cells = y
+    for i in 1:d
+        core = y_cells[i, 1]
+        core isa SparseMatrixCSC && error("Expansion of sparse matrices is not allowed yet")
+        m[i] = size(core, 3)
     end
 
     Y = nothing
@@ -234,5 +275,50 @@ function expand_dR(y)
         Yk = reshape(Yk, ncum, mcum, size(Yk, 2))
         Y = Y === nothing ? Yk : Y + Yk
     end
-    return Y
+    # Reshape to proper dimensions
+    return reshape(Y, Tuple(n)..., :)
+end
+
+"""
+Expand a TTMatrix to a full dense matrix.
+
+The result is compatible with Julia's `kron` function for matrices.
+"""
+function tt_full(A::TTMatrix{T}) where T
+    d = length(A.cores)
+    n, m = tt_dims(A)
+    
+    # Compute full matrix via sequential contraction
+    result = ones(T, 1, 1)
+    ncum = 1
+    mcum = 1
+    
+    for i in 1:d
+        core = A.cores[i]  # r1 × ni × mi × r2
+        r1, ni, mi, r2 = size(core)
+        
+        # Contract with previous result
+        core_mat = reshape(core, r1, ni * mi * r2)
+        result = result * core_mat  # (ncum*mcum) × (ni*mi*r2)
+        
+        # Reshape to separate dimensions
+        result = reshape(result, ncum, mcum, ni, mi * r2)
+        result = permutedims(result, (1, 3, 2, 4))  # ncum × ni × mcum × (mi*r2)
+        
+        ncum *= ni
+        mcum *= mi
+        result = reshape(result, ncum * mcum, r2)
+    end
+    
+    # Reshape to (n1, n2, ..., nd, m1, m2, ..., md) then permute
+    # Internal gives: (n1, ..., nd) row-major style
+    # For kron compatibility, need to reverse the dimension order
+    result_arr = reshape(result, n..., m...)
+    
+    # Permute to kron-compatible order: (nd, ..., n1, md, ..., m1)
+    # Then reshape to (prod(n), prod(m))
+    perm = vcat(d:-1:1, 2d:-1:d+1)
+    result_arr = permutedims(result_arr, perm)
+    
+    return reshape(result_arr, prod(n), prod(m))
 end
