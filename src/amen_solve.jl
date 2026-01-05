@@ -126,65 +126,60 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
     get!(opts, :verb, 1)
     get!(opts, :local_prec, "")
 
+    # Cache opts values for type stability
+    resid_damp = opts[:resid_damp]::Real
+    rmax = opts[:rmax]::Real
+    max_full_size = opts[:max_full_size]::Real
+    local_iters_val = opts[:local_iters]
+    trunc_norm = opts[:trunc_norm]::String
+    kickrank2 = opts[:kickrank2]::Real
+    verb = opts[:verb]::Real
+    local_prec = opts[:local_prec]::String
+
     T = eltype(x[1, 1])
 
-    XAX = Array{Any}(undef, Ra, d + 1)
-    XY = Array{Any}(undef, Ry, d + 1)
-    XAUX = Raux > 0 ? Array{Any}(undef, Raux, d + 1) : nothing
+    XAX = Matrix{Array{T,3}}(undef, Ra, d + 1)
+    XY = Matrix{Matrix{T}}(undef, Ry, d + 1)
+    XAUX = Raux > 0 ? Matrix{Matrix{T}}(undef, Raux, d + 1) : nothing
 
     for k in 1:Ra
         XAX[k, 1] = ones(T, 1, 1, 1)
         XAX[k, d + 1] = ones(T, 1, 1, 1)
-        for i in 2:d
-            XAX[k, i] = nothing
-        end
     end
     for k in 1:Ry
         XY[k, 1] = ones(T, 1, 1)
         XY[k, d + 1] = ones(T, 1, 1)
-        for i in 2:d
-            XY[k, i] = nothing
-        end
     end
     if Raux > 0
         for k in 1:Raux
             XAUX[k, 1] = ones(T, 1, 1)
             XAUX[k, d + 1] = ones(T, 1, 1)
-            for i in 2:d
-                XAUX[k, i] = nothing
-            end
         end
     end
 
     if ZAX === nothing
-        ZAX = similar(XAX)
+        ZAX = Matrix{Array{T,3}}(undef, Ra, d + 1)
         for k in 1:Ra
             ZAX[k, 1] = ones(T, 1, 1, ra[1, k])
             ZAX[k, d + 1] = ones(T, 1, 1, ra[d + 1, k])
-            for i in 2:d
-                ZAX[k, i] = nothing
-            end
         end
     end
     if ZY === nothing
-        ZY = similar(XY)
+        ZY = Matrix{Matrix{T}}(undef, Ry, d + 1)
         for k in 1:Ry
             ZY[k, 1] = ones(T, 1, 1)
             ZY[k, d + 1] = ones(T, 1, 1)
-            for i in 2:d
-                ZY[k, i] = nothing
-            end
         end
     end
 
     for i in d:-1:2
         if Rz > 0
-            if ZY[1, i] === nothing
+            if !isassigned(ZY, 1, i)
                 crzy = reshape(z[i, 1], rz[i] * n[i] * rz[i + 1], 1)
             else
                 crzy = assemble_local_vector(vec(ZY[:, i]), collect(y[i, :]), vec(ZY[:, i + 1]))
             end
-            if ZAX[1, i] === nothing
+            if !isassigned(ZAX, 1, i)
                 crzAx = zeros(T, rz[i] * n[i] * rz[i + 1], 1)
             else
                 Ai = collect(A[i, :])
@@ -197,10 +192,10 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
             end
             crz = crzy - crzAx
             crz = reshape(crz, rz[i], n[i] * rz[i + 1])
-            if opts[:kickrank2] > 0
+            if kickrank2 > 0
                 U, S, V = svd(crz; full=false)
-                crz = V[:, 1:max(rz[i] - opts[:kickrank2], 1)]'
-                crz = vcat(crz, randn(T, opts[:kickrank2], n[i] * rz[i + 1]))
+                crz = V[:, 1:max(rz[i] - kickrank2, 1)]'
+                crz = vcat(crz, randn(T, kickrank2, n[i] * rz[i + 1]))
             end
             crz = reshape(crz, rz[i], n[i], 1, rz[i + 1])
             z[i - 1, 1], z[i, 1], rz[i] = orthogonalise_block(z[i - 1, 1], crz, -1)
@@ -221,7 +216,7 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
 
     for i in 1:d
         sol_prev = reshape(x[i, 1], rx[i] * n[i] * rx[i + 1], 1)
-        lociters = opts[:local_iters]
+        lociters = local_iters_val
         if lociters isa AbstractVector
             lociters = lociters[i]
         end
@@ -242,7 +237,7 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
         resids[i] = norm(rhs - mvfun(sol_prev)) / norm_rhs
 
         if lociters > 0
-            if rx[i] * n[i] * rx[i + 1] < opts[:max_full_size]
+            if rx[i] * n[i] * rx[i + 1] < max_full_size
                 B, sparseflag = assemble_local_matrix(XAX1, Ai, XAX2)
                 rhs_local = rhs
                 if sparseflag
@@ -257,11 +252,11 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
                     sol = reshape(sol, rx[i] * n[i] * rx[i + 1], 1)
                 end
             else
-                tol_loc = max(loctol / opts[:resid_damp], eps(Float64) * 1e3)
+                tol_loc = max(loctol / resid_damp, eps(Float64) * 1e3)
                 sol, flg, _, _ = bicgstab(mvfun, rhs; x0=sol_prev, tol=tol_loc, maxiter=lociters)
                 if flg > 0
                     precfun = nothing
-                    if opts[:local_prec] == "r"
+                    if local_prec == "r"
                         P = assemble_local_rjacobi(XAX1, Ai, XAX2)
                         precfun = xvec -> local_precvec(xvec, rx[i], n[i], rx[i + 1], 1, P)
                     end
@@ -278,10 +273,10 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
         if loctol > 0 && i < d && (Rz + Raux) > 0
             U, S, V = svd(sol; full=false)
             s = S
-            if opts[:trunc_norm] == "fro" || lociters == 0
+            if trunc_norm == "fro" || lociters == 0
                 sum_s = cumsum(reverse(s .^ 2))
                 target = (loctol * norm(s))^2
-                r = findfirst(x -> x >= target, sum_s)
+                r = findfirst(val -> val >= target, sum_s)
                 r = r === nothing ? length(s) : (length(s) - r + 1)
             else
                 res_new = norm(rhs - mvfun(sol)) / norm_rhs
@@ -289,16 +284,16 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
                 r = max(r - rz[i + 1, 1], 1)
                 cursol = U[:, 1:r] * Diagonal(s[1:r]) * V[:, 1:r]'
                 res = norm(rhs - mvfun(cursol)) / norm_rhs
-                drank = res < max(loctol, res_new * opts[:resid_damp]) ? -1 : 1
+                drank = res < max(loctol, res_new * resid_damp) ? -1 : 1
                 while r > 0 && r <= length(s)
                     cursol = U[:, 1:r] * Diagonal(s[1:r]) * V[:, 1:r]'
                     res = norm(rhs - mvfun(cursol)) / norm_rhs
                     if drank > 0
-                        if res < max(loctol, res_new * opts[:resid_damp])
+                        if res < max(loctol, res_new * resid_damp)
                             break
                         end
                     else
-                        if res >= max(loctol, res_new * opts[:resid_damp])
+                        if res >= max(loctol, res_new * resid_damp)
                             break
                         end
                     end
@@ -310,8 +305,8 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
                 r = min(r, length(s))
             end
             r = min(r, length(s))
-            if isfinite(opts[:rmax])
-                r = min(r, Int(opts[:rmax]))
+            if isfinite(rmax)
+                r = min(r, Int(rmax))
             end
             u = U[:, 1:r]
             v = Diagonal(s[1:r]) * V[:, 1:r]'
@@ -323,7 +318,7 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
             r = size(u, 2)
         end
 
-        if opts[:verb] > 1
+        if verb > 1
             println("Rank: $r")
         end
 
@@ -332,10 +327,10 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
             crzAx = local_matvec(reshape(sol, rx[i] * n[i] * rx[i + 1], 1), rx[i], n[i], rx[i + 1], 1, rz[i], n[i], rz[i + 1], vec(ZAX[:, i]), Ai, vec(ZAX[:, i + 1]), Ra, ra1, ra2)
             crz = crzy - crzAx
             crz = reshape(crz, rz[i] * n[i], rz[i + 1])
-            if opts[:kickrank2] > 0 && i < d
+            if kickrank2 > 0 && i < d
                 U2, _, _ = svd(crz; full=false)
-                crz = U2[:, 1:max(rz[i + 1, 1] - opts[:kickrank2], 1)]
-                crz = hcat(crz, randn(T, rz[i] * n[i], opts[:kickrank2]))
+                crz = U2[:, 1:max(rz[i + 1, 1] - kickrank2, 1)]
+                crz = hcat(crz, randn(T, rz[i] * n[i], kickrank2))
             end
             rzold = rz[i + 1]
             crz = reshape(crz, rz[i], n[i], 1, rz[i + 1])

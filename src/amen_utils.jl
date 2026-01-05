@@ -33,7 +33,7 @@ function orthogonalise_block(x_next, x, dir::Integer)
     end
 end
 
-function leftreduce_vector(WX1::Vector, w::AbstractArray, x::Vector)
+function leftreduce_vector(WX1::AbstractVector, w::AbstractArray, x::AbstractVector)
     WX2 = copy(WX1)
     rw1, n, _, rw2 = size(w)
     wc = reshape(w, rw1, n * rw2)
@@ -49,7 +49,7 @@ function leftreduce_vector(WX1::Vector, w::AbstractArray, x::Vector)
     return WX2
 end
 
-function leftreduce_matrix(WAX1::Vector, w::AbstractArray, A::Vector, x::AbstractArray)
+function leftreduce_matrix(WAX1::AbstractVector, w::AbstractArray, A::AbstractVector, x::AbstractArray)
     WAX2 = copy(WAX1)
     rx1, m, _, rx2 = size(x)
     rw1, n, _, rw2 = size(w)
@@ -75,7 +75,7 @@ function leftreduce_matrix(WAX1::Vector, w::AbstractArray, A::Vector, x::Abstrac
     return WAX2
 end
 
-function rightreduce_vector(WX2::Vector, w::AbstractArray, x::Vector)
+function rightreduce_vector(WX2::AbstractVector, w::AbstractArray, x::AbstractVector)
     WX1 = copy(WX2)
     rw1, n, _, rw2 = size(w)
     wc = reshape(w, rw1, n * rw2)
@@ -89,7 +89,7 @@ function rightreduce_vector(WX2::Vector, w::AbstractArray, x::Vector)
     return WX1
 end
 
-function rightreduce_matrix(WAX2::Vector, w::AbstractArray, A::Vector, x::AbstractArray)
+function rightreduce_matrix(WAX2::AbstractVector, w::AbstractArray, A::AbstractVector, x::AbstractArray)
     WAX1 = copy(WAX2)
     rw1, n, _, rw2 = size(w)
     wc = reshape(conj.(w), rw1, n * rw2)
@@ -189,7 +189,7 @@ function local_matvec(x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, Ra, ra1, ra
     return w
 end
 
-function assemble_local_matrix(WAX1::Vector, A::Vector, WAX2::Vector)
+function assemble_local_matrix(WAX1::AbstractVector, A::AbstractVector, WAX2::AbstractVector)
     Ra = length(A)
     sparseflag = all(k -> issparse(A[k]), 1:Ra)
     if sparseflag
@@ -250,7 +250,7 @@ function assemble_local_matrix(WAX1::Vector, A::Vector, WAX2::Vector)
     return B === nothing ? spzeros(eltype(A[1]), 0, 0) : B, sparseflag
 end
 
-function assemble_local_vector(WX1::Vector, x::Vector, WX2::Vector)
+function assemble_local_vector(WX1::AbstractVector, x::AbstractVector, WX2::AbstractVector)
     w = zeros(eltype(x[1]), 0, 0)
     for k in eachindex(x)
         rx1, n, _, rx2 = size(x[k])
@@ -268,7 +268,7 @@ function assemble_local_vector(WX1::Vector, x::Vector, WX2::Vector)
     return w
 end
 
-function assemble_local_rjacobi(WAX1::Vector, A::Vector, WAX2::Vector)
+function assemble_local_rjacobi(WAX1::AbstractVector, A::AbstractVector, WAX2::AbstractVector)
     rx1 = size(WAX1[1], 2)
     rx2 = size(WAX2[1], 2)  # Julia shape (rw2, rx2, ra2)
     P = [zeros(eltype(A[1]), 0, 0) for _ in 1:rx1]
