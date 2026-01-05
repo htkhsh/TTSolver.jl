@@ -1,5 +1,5 @@
 # Spin-Boson model simulation using tt_ksl
-# 
+#
 # This example demonstrates the KSL (Projector-Splitting) integrator for
 # time evolution of quantum systems in TT format.
 #
@@ -8,8 +8,8 @@
 
 using LinearAlgebra
 using TTSolver
-using Plots
-using DelimitedFiles
+
+include("../../common/plot_utils.jl")
 
 function boson_operators(nb::Integer)
     a = zeros(Float64, nb, nb)
@@ -115,15 +115,15 @@ let u = x0
     for i in 2:length(ts)
         # Use tt_ksl with rmax and default Krylov method
         u = tt_ksl(u, A_tt, dt; rmax=rmax, tol=1e-12, krylov_m=30)
-        
+
         # Compute norm and wavefunction
         norm_tt[i] = real(tt_dot(u, u))
         psi_tt[i] = vec(tt_full(u))
-        
+
         # Exact solution
         psi_exact[i] = exp(-1im * H_full * ts[i]) * psi0
         norm_exact[i] = sum(abs2, psi_exact[i])
-        
+
         if i % 40 == 0
             err = norm(psi_tt[i] - psi_exact[i])
             println("  Step $i/$(length(ts)-1), t=$(round(ts[i], digits=2)), ranks=$(tt_ranks(u)), error=$err")
@@ -132,13 +132,8 @@ let u = x0
 end
 
 # Compute populations
-# kron(spin, boson) index: k = (i_spin-1)*nb + i_boson
-# spin-up: i_spin=1, k = 1:nb
-# spin-down: i_spin=2, k = nb+1:2*nb
-p_up_exact = [sum(abs2, v[1:nb]) for v in psi_exact]
-p_dn_exact = [sum(abs2, v[nb+1:end]) for v in psi_exact]
-p_up_tt = [sum(abs2, v[1:nb]) for v in psi_tt]
-p_dn_tt = [sum(abs2, v[nb+1:end]) for v in psi_tt]
+p_up_exact, p_dn_exact = compute_spin_populations(psi_exact, nb)
+p_up_tt, p_dn_tt = compute_spin_populations(psi_tt, nb)
 
 # Compute errors
 max_error_up = maximum(abs.(p_up_exact - p_up_tt))
@@ -149,25 +144,21 @@ println("  Max error P(↓): $max_error_dn")
 println("  Max norm deviation: $(maximum(abs.(norm_tt .- 1.0)))")
 
 # Plot populations
-plt = plot(ts, p_up_exact; label="exact P(↑)", linewidth=2)
-plot!(plt, ts, p_up_tt; label="KSL P(↑)", linestyle=:dash, linewidth=2)
-plot!(plt, ts, p_dn_exact; label="exact P(↓)", linewidth=2)
-plot!(plt, ts, p_dn_tt; label="KSL P(↓)", linestyle=:dash, linewidth=2)
-plot!(plt; xlabel="t", ylabel="population", 
-      title="Spin-Boson (KSL, Krylov, g=$g)")
-
-savefig(plt, "sb_ksl.png")
-println("\nSaved: sb_ksl.png")
+fig_pop = plot_spin_boson_populations(
+    ts, p_up_exact, p_up_tt, p_dn_exact, p_dn_tt;
+    method="KSL",
+    title_suffix="KSL, Krylov, g=$g",
+    filename="sb_ksl.png"
+)
+display(fig_pop)
 
 # Plot norm
-plt_norm = plot(ts, norm_exact; label="exact norm", linewidth=2)
-plot!(plt_norm, ts, norm_tt; label="KSL norm", linestyle=:dash, linewidth=2)
-plot!(plt_norm; xlabel="t", ylabel="norm", title="Norm conservation (KSL)")
-
-savefig(plt_norm, "sb_ksl_norm.png")
-println("Saved: sb_ksl_norm.png")
+fig_norm = plot_norm_conservation(
+    ts, norm_exact, norm_tt;
+    method="KSL",
+    filename="sb_ksl_norm.png"
+)
+display(fig_norm)
 
 # Save data
-data = hcat(ts, p_up_exact, p_up_tt, p_dn_exact, p_dn_tt, norm_exact, norm_tt)
-writedlm("sb_ksl_data.csv", data, ',')
-println("Saved: sb_ksl_data.csv")
+save_spin_boson_data("sb_ksl_data.csv", ts, p_up_exact, p_up_tt, p_dn_exact, p_dn_tt, norm_exact, norm_tt)

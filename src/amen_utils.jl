@@ -127,16 +127,19 @@ end
 
 function local_matvec(x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, Ra, ra1, ra2)
     T = eltype(x)
-    w = zeros(eltype(x), rw1 * n * rw2, b)
+    w = zeros(T, rw1 * n * rw2, b)
     w4 = reshape(w, rw1, n, rw2, b)
     x4 = reshape(x, rx1, m, rx2, b)
     xmat = reshape(x, rx1 * m * rx2, b)
     xc = reshape(PermutedDimsArray(xmat, (2, 1)), b * rx1 * m, rx2)
+    
+    # Pre-allocate buffers (will be resized as needed)
     wk_buf = Matrix{T}(undef, 0, 0)
     wk2_buf = Matrix{T}(undef, 0, 0)
     wk3_buf = Matrix{T}(undef, 0, 0)
     rows1 = b * rx1 * m
     rows3 = rw1
+    
     @inbounds for k in 1:Ra
         WAX1k = WAX1[k]
         WAX2k = WAX2[k]
@@ -175,10 +178,12 @@ function local_matvec(x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, Ra, ra1, ra
             w .+= wk
         else
             A4 = ndims(A[k]) == 4 ? A[k] : reshape(A[k], ra1[k], n, m, ra2[k])
-            # WAX2k has Julia shape (rw2, rx2, ra2), need to use correct indices
-            # The @tensor macro expects specific index ordering, so we permute WAX2k
-            WAX2k_perm = permutedims(WAX2k, (3, 1, 2))  # (ra2, rw2, rx2)
-            @tensor w4[rw1i, n_i, rw2i, bi] += WAX1k[rw1i, rx1i, ra1i] * A4[ra1i, n_i, m_i, ra2i] * x4[rx1i, m_i, rx2i, bi] * WAX2k_perm[ra2i, rw2i, rx2i]
+            # WAX1k shape: (rw1, rx1, ra1)
+            # WAX2k shape: (rw2, rx2, ra2) - use directly without permutedims
+            # A4 shape: (ra1, n, m, ra2)
+            # x4 shape: (rx1, m, rx2, b)
+            # w4 shape: (rw1, n, rw2, b)
+            @tensor w4[rw1i, n_i, rw2i, bi] += WAX1k[rw1i, rx1i, ra1i] * A4[ra1i, n_i, m_i, ra2i] * x4[rx1i, m_i, rx2i, bi] * WAX2k[rw2i, rx2i, ra2i]
         end
     end
     return w

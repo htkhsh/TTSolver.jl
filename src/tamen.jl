@@ -339,11 +339,8 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing)
                 rfs = vcat([size(x0[i, 1], 1) for i in 1:(d + 1)], 1)
             end
 
-            # Reset ZAX and ZY for each sweep to avoid dimension mismatch issues
-            # when rz or rx changes between sweeps
-            # This is less efficient than reusing projections, but more robust
-            ZAX = nothing
-            ZY = nothing
+            # Note: ZAX and ZY are reused across sweeps for efficiency.
+            # The amenany_sweep function handles dimension changes internally.
 
             X, rx, z, ZAX, ZY, opts, errs, resids, XAX, XY, XAUX = amenany_sweep(X, As, x0rhs, z, tol, opts, ZAX, ZY, Aux)
             max_err = maximum(errs)

@@ -1,7 +1,12 @@
+# Spin-Boson model simulation using tAMEn
+#
+# This example demonstrates the tAMEn (Time-dependent AMEn) integrator for
+# time evolution of quantum systems in TT format with rank adaptation.
+
 using LinearAlgebra
 using TTSolver
-using Plots
-using DelimitedFiles
+
+include("../../common/plot_utils.jl")
 
 function boson_operators(nb::Integer)
     a = zeros(Float64, nb, nb)
@@ -14,7 +19,7 @@ function boson_operators(nb::Integer)
     return a, adag, x, n_op
 end
 
-
+# Parameters
 nb = 6
 nt = 3
 tol = 1e-4
@@ -34,11 +39,19 @@ idb = Matrix{ComplexF64}(I, nb, nb)
 ω = 1.2
 g = 0.3
 
+# Hamiltonian in TT format
 H_tt =
     0.5 * Δ0 * tt_mkron(sigma_z, idb) +
     0.5 * Δx * tt_mkron(sigma_x, idb) +
     ω * tt_mkron(id2, Matrix{ComplexF64}(n_op)) +
     g * tt_mkron(sigma_z, Matrix{ComplexF64}(x_op))
+
+# Full Hamiltonian for exact solution
+H_full =
+    0.5 * Δ0 * kron(sigma_z, idb) +
+    0.5 * Δx * kron(sigma_x, idb) +
+    ω * kron(id2, Matrix{ComplexF64}(n_op)) +
+    g * kron(sigma_z, Matrix{ComplexF64}(x_op))
 
 opts = Dict(
     :verb => 1,
@@ -58,22 +71,21 @@ A = (-1im) * H_tt
 
 ts = collect(range(0.0, Tfin; length=Nsteps + 1))
 
-H_full =
-    0.5 * Δ0 * kron(sigma_z, idb) +
-    0.5 * Δx * kron(sigma_x, idb) +
-    ω * kron(id2, Matrix{ComplexF64}(n_op)) +
-    g * kron(sigma_z, Matrix{ComplexF64}(x_op))
-
 psi0 = kron(ComplexF64[1.0, 0.0], ComplexF64[1.0; zeros(ComplexF64, nb - 1)])
 
+# Storage for results
 psi_exact = Vector{Vector{ComplexF64}}(undef, length(ts))
 psi_tt = Vector{Vector{ComplexF64}}(undef, length(ts))
 norm_exact = zeros(Float64, length(ts))
 norm_tt = zeros(Float64, length(ts))
+
 psi_exact[1] = psi0
 psi_tt[1] = vec(tt_full(x0))
 norm_exact[1] = sum(abs2, psi_exact[1])
 norm_tt[1] = sum(abs2, psi_tt[1])
+
+println("Running tAMEn time evolution...")
+println("Parameters: nb=$nb, nt=$nt, dt=$dt, Tfin=$Tfin, g=$g")
 
 scheme = String(opts[:time_scheme])
 let u = x0
@@ -89,28 +101,34 @@ let u = x0
     end
 end
 
-# kron(spin, boson) gives index: k = (i_spin-1)*nb + i_boson
-# spin-up: k = 1:nb, spin-down: k = nb+1:2*nb
-p_up_exact = [sum(abs2, v[1:nb]) for v in psi_exact]
-p_dn_exact = [sum(abs2, v[nb+1:end]) for v in psi_exact]
-p_up_tt = [sum(abs2, v[1:nb]) for v in psi_tt]
-p_dn_tt = [sum(abs2, v[nb+1:end]) for v in psi_tt]
+# Compute populations
+p_up_exact, p_dn_exact = compute_spin_populations(psi_exact, nb)
+p_up_tt, p_dn_tt = compute_spin_populations(psi_tt, nb)
 
-plt = plot(ts, p_up_exact; label="exact P(↑)", linewidth=2)
-plot!(plt, ts, p_up_tt; label="tAMEn P(↑)", linestyle=:dash)
-plot!(plt, ts, p_dn_exact; label="exact P(↓)", linewidth=2)
-plot!(plt, ts, p_dn_tt; label="tAMEn P(↓)", linestyle=:dash)
-plot!(plt; xlabel="t", ylabel="population", title="Spin-Boson (tamen)")
+# Compute errors
+max_error_up = maximum(abs.(p_up_exact - p_up_tt))
+max_error_dn = maximum(abs.(p_dn_exact - p_dn_tt))
+println("\nResults:")
+println("  Max error P(↑): $max_error_up")
+println("  Max error P(↓): $max_error_dn")
+println("  Max norm deviation: $(maximum(abs.(norm_tt .- 1.0)))")
 
-savefig(plt, "sb_tamen.png")
-display(plt)
+# Plot populations
+fig_pop = plot_spin_boson_populations(
+    ts, p_up_exact, p_up_tt, p_dn_exact, p_dn_tt;
+    method="tAMEn",
+    title_suffix="tAMEn, g=$g",
+    filename="sb_tamen.png"
+)
+display(fig_pop)
 
-plt_norm = plot(ts, norm_exact; label="exact norm", linewidth=2)
-plot!(plt_norm, ts, norm_tt; label="tAMEn norm", linestyle=:dash)
-plot!(plt_norm; xlabel="t", ylabel="norm", title="Norm check")
+# Plot norm
+fig_norm = plot_norm_conservation(
+    ts, norm_exact, norm_tt;
+    method="tAMEn",
+    filename="sb_tamen_norm.png"
+)
+display(fig_norm)
 
-savefig(plt_norm, "sb_tamen_norm.png")
-display(plt_norm)
-
-data = hcat(ts, p_up_exact, p_up_tt, p_dn_exact, p_dn_tt, norm_exact, norm_tt)
-writedlm("sb_tamen_data.csv", data, ',')
+# Save data
+save_spin_boson_data("sb_tamen_data.csv", ts, p_up_exact, p_up_tt, p_dn_exact, p_dn_tt, norm_exact, norm_tt)
