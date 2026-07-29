@@ -89,3 +89,48 @@ end
     expected = exp(-alpha) .* full0
     @test full_end ≈ expected atol=5e-3
 end
+
+@testset "homogeneous KSL API" begin
+    A_dense = [1.0 0.2; -0.1 0.7]
+    x_dense = [0.3, -0.8]
+    tau = 0.2
+
+    A = TTMatrix([reshape(A_dense, 1, 2, 2, 1)])
+    x0 = TTTensor([reshape(x_dense, 1, 2, 1)])
+
+    for symmetric in (false, true)
+        x = tt_ksl(x0, A, tau; symmetric, expmethod=:taylor)
+        @test vec(tt_full(x)) ≈ exp(-tau * A_dense) * x_dense rtol=1e-12
+    end
+
+    y = TTTensor([reshape([0.4, 0.1], 1, 2, 1)])
+    @test_throws MethodError tt_ksl(x0, A, y, tau)
+    @test_throws MethodError tt_ksl(x0, A, tau; passes=2)
+end
+
+function dense_two_site_tt(v::AbstractVector, n1::Int, n2::Int)
+    M = permutedims(reshape(v, n2, n1))
+    F = svd(M)
+    r = length(F.S)
+    return TTTensor([
+        reshape(F.U * Diagonal(F.S), 1, n1, r),
+        reshape(F.Vt, r, n2, 1),
+    ])
+end
+
+@testset "complex homogeneous KSL" begin
+    H1 = ComplexF64[0.3 0.2im; -0.2im -0.1]
+    H2 = ComplexF64[0.7 0.1; 0.1 -0.4]
+    I2 = Matrix{ComplexF64}(I, 2, 2)
+    A = im * (tt_mkron(H1, I2) + tt_mkron(I2, H2))
+    A_dense = im * (kron(H1, I2) + kron(I2, H2))
+    x_dense = ComplexF64[0.2 + 0.1im, -0.3im, 0.7, -0.4 + 0.2im]
+    x0 = dense_two_site_tt(x_dense, 2, 2)
+    tau = 0.15
+
+    x = tt_ksl(x0, A, tau; symmetric=true, expmethod=:taylor)
+    result = vec(tt_full(x))
+
+    @test result ≈ exp(-tau * A_dense) * x_dense rtol=1e-11
+    @test norm(result) ≈ norm(x_dense) rtol=1e-11
+end

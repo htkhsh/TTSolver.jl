@@ -1,61 +1,35 @@
 """
-    tt_ksl(x0, A, y, tau; kwargs...)
+    tt_ksl(x0, A, tau; kwargs...)
 
-Linear KSL (Projector-Splitting) time scheme in the TT format.
+Homogeneous linear KSL (projector-splitting) time integrator in TT format.
 
-Integrates the system `dx/dt + Ax = y` on `t ∈ [0, τ]`.
+Integrates `dx/dt + A*x = 0` over one time step of length `tau`.
 
-Uses matrix exponential as the local solver. The matrix `A` is assumed to be 
-time-independent, and R.H.S. `y` is given at the middle time point.
-
-# Arguments
-- `x0::TTTensor`: Initial condition
-- `A::TTMatrix`: Time-independent operator
-- `y::TTTensor`: Right-hand side (source term)
-- `tau::Real`: Time step size
-
-# Keyword Arguments
-- `tol::Real=1e-12`: Tolerance for exponential computation
-- `rmax::Int=typemax(Int)`: Maximum TT-rank (for rank truncation after SVD)
-- `passes::Int=2`: Number of half-sweeps (1 = forward only, 2 = forward + backward)
-- `expmethod::Symbol=:krylov`: Method for matrix exponential (`:krylov` or `:taylor`)
-- `krylov_m::Int=30`: Krylov subspace dimension (for `:krylov` method)
-
-# Returns
-- `x::TTTensor`: Solution at time `τ`
-
-# References
-- Lubich, C., Oseledets, I. (2014). A projector-splitting integrator for dynamical 
-  low-rank approximation. BIT Numerical Mathematics.
+With `symmetric=true`, performs a left-to-right half-sweep followed by a
+right-to-left half-sweep. With `symmetric=false`, performs one full
+left-to-right sweep.
 """
-function tt_ksl(x0::TTTensor, A::TTMatrix, y::TTTensor, tau::Real;
-                tol::Real=1e-12, rmax::Int=typemax(Int), passes::Int=2,
+function tt_ksl(x0::TTTensor, A::TTMatrix, tau::Real;
+                tol::Real=1e-12, rmax::Int=typemax(Int),
+                symmetric::Bool=true,
                 expmethod::Symbol=:krylov, krylov_m::Int=30)
     
     n = tt_dims(x0)
     d = length(n)
     rx = collect(tt_ranks(x0))
     ra = tt_ranks(A)
-    ry = tt_ranks(y)
-    
-    T = promote_type(eltype(x0.cores[1]), eltype(A.cores[1]), eltype(y.cores[1]))
+    T = promote_type(eltype(x0.cores[1]), eltype(A.cores[1]))
     
     # Convert to cell arrays (vectors of 3D/4D arrays)
     crx = [convert(Array{T}, copy(core)) for core in x0.cores]
-    cry = [convert(Array{T}, copy(core)) for core in y.cores]
     cra = [convert(Array{T}, copy(core)) for core in A.cores]
     
     # Initialize phi arrays
     # phia[i]: rx[i]' × rx[i] × ra[i]  (for Galerkin projection of A)
-    # phiy[i]: rx[i]' × ry[i]          (for RHS projection)
     phia = Vector{Array{T,3}}(undef, d + 1)
-    phiy = Vector{Array{T,2}}(undef, d + 1)
     phia[1] = ones(T, 1, 1, 1)
     phia[d + 1] = ones(T, 1, 1, 1)
-    phiy[1] = ones(T, 1, 1)
-    phiy[d + 1] = ones(T, 1, 1)
-    
-    tau_pass = tau / passes
+    tau_sweep = symmetric ? tau / 2 : tau
     
     # Select exponential method
     # Note: Krylov method from ExponentialUtilities.jl doesn't support ComplexF64 SymTridiagonal
@@ -94,7 +68,6 @@ function tt_ksl(x0::TTTensor, A::TTMatrix, y::TTTensor, tau::Real;
         
         # Compute phis (right to left)
         phia[i] = compute_next_Phi(phia[i + 1], crx[i], cra[i], crx[i], "rl")
-        phiy[i] = compute_next_Phi_y(phiy[i + 1], crx[i], cry[i], "rl")
     end
     
     # Forward sweep
@@ -102,17 +75,10 @@ function tt_ksl(x0::TTTensor, A::TTMatrix, y::TTTensor, tau::Real;
         Phi1 = phia[i]
         Phi2 = phia[i + 1]
         A1 = cra[i]
-        y1 = cry[i]
-        
-        # Compute RHS: phiy[i] * y1 * phiy[i+1]
-        rhs = compute_rhs_ksl(phiy[i], y1, phiy[i + 1], rx[i], n[i], rx[i + 1])
-        
         # Previous solution
         sol_prev = vec(crx[i])
         
-        # K-step: exp(-τA) * x + τ * rhs  (for dx/dt + Ax = y)
-        sol = expv_local(x -> -tau_pass * bfun3(Phi1, A1, Phi2, x), sol_prev)
-        sol = sol .+ tau_pass .* rhs
+        sol = expv_local(x -> -tau_sweep * bfun3(Phi1, A1, Phi2, x), sol_prev)
         
         if i < d
             # SVD for S-step with rank truncation
@@ -127,16 +93,9 @@ function tt_ksl(x0::TTTensor, A::TTMatrix, y::TTTensor, tau::Real;
             crx[i] = reshape(U, rx[i], n[i], rnew)
             phia[i + 1] = compute_next_Phi(phia[i], crx[i], cra[i], crx[i], "lr")
             
-            # Compute projected RHS for S
-            rhss = reshape(rhs, rx[i] * n[i], rx[i + 1])
-            rhss = U' * rhss
-            rhss = vec(rhss)
-            
             S_prev_vec = vec(S_prev)
             
-            # S-step: exp(τA) * S - τ * rhs  (backward correction)
-            S = expv_local(x -> tau_pass * bfun2(phia[i + 1], Phi2, x), S_prev_vec)
-            S = S .- tau_pass .* rhss
+            S = expv_local(x -> tau_sweep * bfun2(phia[i + 1], Phi2, x), S_prev_vec)
             
             # Stuff back
             S = reshape(S, rnew, rx[i + 1])
@@ -145,30 +104,20 @@ function tt_ksl(x0::TTTensor, A::TTMatrix, y::TTTensor, tau::Real;
             rx[i + 1] = rnew
             crx[i + 1] = reshape(cr2, rnew, n[i + 1], rx[i + 2])
             
-            # Update phiy
-            phiy[i + 1] = compute_next_Phi_y(phiy[i], crx[i], cry[i], "lr")
         else
             crx[i] = reshape(sol, rx[i], n[i], rx[i + 1])
         end
     end
     
-    # Backward sweep (if passes > 1)
-    if passes > 1
+    if symmetric
         for i in d:-1:1
             Phi1 = phia[i]
             Phi2 = phia[i + 1]
             A1 = cra[i]
-            y1 = cry[i]
-            
-            # Compute RHS
-            rhs = compute_rhs_ksl(phiy[i], y1, phiy[i + 1], rx[i], n[i], rx[i + 1])
-            
             # Previous solution
             sol_prev = vec(crx[i])
             
-            # V-step: exp(-τA) * x + τ * rhs
-            sol = expv_local(x -> -tau_pass * bfun3(Phi1, A1, Phi2, x), sol_prev)
-            sol = sol .+ tau_pass .* rhs
+            sol = expv_local(x -> -tau_sweep * bfun3(Phi1, A1, Phi2, x), sol_prev)
             
             if i > 1
                 # SVD for S-step (different direction) with rank truncation
@@ -183,16 +132,9 @@ function tt_ksl(x0::TTTensor, A::TTMatrix, y::TTTensor, tau::Real;
                 crx[i] = reshape(collect(transpose(V)), rnew, n[i], rx[i + 1])
                 phia[i] = compute_next_Phi(phia[i + 1], crx[i], cra[i], crx[i], "rl")
                 
-                # Compute projected RHS for S
-                rhss = reshape(rhs, rx[i], n[i] * rx[i + 1])
-                rhss = rhss * conj(V)
-                rhss = vec(rhss)
-                
                 S_prev_vec = vec(S_prev)
                 
-                # S-step: exp(τA) * S - τ * rhs
-                S = expv_local(x -> tau_pass * bfun2(Phi1, phia[i], x), S_prev_vec)
-                S = S .- tau_pass .* rhss
+                S = expv_local(x -> tau_sweep * bfun2(Phi1, phia[i], x), S_prev_vec)
                 
                 # Stuff back
                 S = reshape(S, rx[i], rnew)
@@ -201,8 +143,6 @@ function tt_ksl(x0::TTTensor, A::TTMatrix, y::TTTensor, tau::Real;
                 rx[i] = rnew
                 crx[i - 1] = reshape(cr2, rx[i - 1], n[i - 1], rnew)
                 
-                # Update phiy
-                phiy[i] = compute_next_Phi_y(phiy[i + 1], crx[i], cry[i], "rl")
             else
                 crx[i] = reshape(sol, rx[i], n[i], rx[i + 1])
             end
@@ -279,89 +219,6 @@ function compute_next_Phi(Phi_prev::Array{T,3}, x::Array, A::Array, y::Array, di
     end
     
     return Phi
-end
-
-"""
-Compute the next Phi matrix for RHS projection (A = empty case).
-
-MATLAB convention for phiy storage:
-- phiy[i]: rx[i] × ry[i]  (stored consistently as rx × ry)
-
-Direction "lr": computes phiy[i+1] from phiy[i]
-  Input Phi_prev: rx[i] × ry[i]
-  Output: rx[i+1] × ry[i+1]
-  
-Direction "rl": computes phiy[i] from phiy[i+1]  
-  Input Phi_prev: rx[i+1] × ry[i+1]
-  Output: rx[i] × ry[i]
-"""
-function compute_next_Phi_y(Phi_prev::Array{T,2}, x::Array, y::Array, direction::String) where T
-    rx1, nx, rx2 = size(x)
-    ry1, ny, ry2 = size(y)
-    
-    if direction == "lr"
-        # Phi_prev: rx1 × ry1
-        # Output: rx2 × ry2
-        
-        # x'[n*rx2, rx1] * Phi_prev[rx1, ry1] = [n*rx2, ry1]
-        x_mat = reshape(x, rx1, nx * rx2)
-        Phi = collect(transpose(x_mat)) * Phi_prev  # (n*rx2) × ry1
-        
-        # Reshape to [n, rx2*ry1] then transpose to [rx2*ry1, n]
-        Phi = reshape(Phi, nx, rx2 * ry1)
-        Phi = collect(transpose(Phi))  # (rx2*ry1) × n
-        Phi = reshape(Phi, rx2, ry1 * nx)  # rx2 × (ry1*n)
-        
-        # Contract with y: y[ry1*n, ry2]
-        y_mat = reshape(y, ry1 * ny, ry2)
-        Phi = Phi * y_mat  # rx2 × ry2
-        
-    else  # "rl"
-        # Phi_prev: rx2 × ry2
-        # Output: rx1 × ry1
-        
-        # y[ry1*n, ry2] * Phi_prev'[ry2, rx2] = [ry1*n, rx2]
-        y_mat = reshape(y, ry1 * ny, ry2)
-        Phi = y_mat * collect(transpose(Phi_prev))  # (ry1*n) × rx2
-        
-        # Reshape to [ry1, n*rx2]
-        Phi = reshape(Phi, ry1, ny * rx2)
-        
-        # Contract with x': x[rx1, n*rx2]' = [n*rx2, rx1]
-        # Phi[ry1, n*rx2] * x'[n*rx2, rx1] would give [ry1, rx1]
-        # But we want [rx1, ry1], so we compute x * Phi'
-        x_mat = reshape(x, rx1, nx * rx2)
-        Phi = x_mat * collect(transpose(Phi))  # rx1 × ry1
-    end
-    
-    return Phi
-end
-
-"""
-Compute RHS projection for KSL: phiy[i] * y * phiy[i+1]
-
-phiy[i]: rx[i] × ry[i]
-phiy[i+1]: rx[i+1] × ry[i+1]
-y: ry[i] × n × ry[i+1]
-Output: rx[i] × n × rx[i+1] (flattened)
-"""
-function compute_rhs_ksl(phiy1::Array{T,2}, y::Array, phiy2::Array{T,2}, rx1, n, rx2) where T
-    ry1, ny, ry2 = size(y)
-    
-    # phiy1: rx1 × ry1
-    # phiy2: rx2 × ry2
-    
-    # phiy1[rx1, ry1] * y[ry1, n*ry2] = [rx1, n*ry2]
-    y_mat = reshape(y, ry1, ny * ry2)
-    rhs = phiy1 * y_mat  # rx1 × (n*ry2)
-    
-    # Reshape to [rx1*n, ry2]
-    rhs = reshape(rhs, size(phiy1, 1) * ny, ry2)
-    
-    # rhs[rx1*n, ry2] * phiy2'[ry2, rx2] = [rx1*n, rx2]
-    rhs = rhs * collect(transpose(phiy2))  # (rx1*n) × rx2
-    
-    return vec(rhs)
 end
 
 """
@@ -526,16 +383,6 @@ end
 
 # Backward compatible alias
 const expv_full = expv_taylor
-
-# Convenience method for homogeneous case (y = 0)
-function tt_ksl(x0::TTTensor, A::TTMatrix, tau::Real; kwargs...)
-    n = tt_dims(x0)
-    d = length(n)
-    T = eltype(x0.cores[1])
-    cores = [zeros(T, 1, ni, 1) for ni in n]
-    y = TTTensor(cores)
-    return tt_ksl(x0, A, y, tau; kwargs...)
-end
 
 # Deprecated alias
 const tt_ksl_ml = tt_ksl
