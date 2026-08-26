@@ -125,68 +125,110 @@ function rightreduce_matrix(WAX2::AbstractVector, w::AbstractArray, A::AbstractV
     return WAX1
 end
 
+struct LocalMatvecWorkspace{T,TA}
+    rx1::Int
+    m::Int
+    rx2::Int
+    b::Int
+    rw1::Int
+    n::Int
+    rw2::Int
+    A::TA
+    ra1::Vector{Int}
+    ra2::Vector{Int}
+    xc::Matrix{T}
+    left::Vector{Matrix{T}}
+    right::Vector{Matrix{T}}
+    x_contract::Vector{Matrix{T}}
+    a_input::Vector{Matrix{T}}
+    a_contract::Vector{Matrix{T}}
+    left_input::Vector{Matrix{T}}
+end
+
+function LocalMatvecWorkspace(x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, ra1, ra2)
+    T = eltype(x)
+    ranks1 = Int.(ra1)
+    ranks2 = Int.(ra2)
+    Ra = length(A)
+    left = Vector{Matrix{T}}(undef, Ra)
+    right = Vector{Matrix{T}}(undef, Ra)
+    x_contract = Vector{Matrix{T}}(undef, Ra)
+    a_input = Vector{Matrix{T}}(undef, Ra)
+    a_contract = Vector{Matrix{T}}(undef, Ra)
+    left_input = Vector{Matrix{T}}(undef, Ra)
+    for k in 1:Ra
+        left[k] = copy(reshape(WAX1[k], rw1, rx1 * ranks1[k]))
+        right[k] = Matrix{T}(undef, ranks2[k] * rw2, rx2)
+        @inbounds for q in 1:ranks2[k], c in 1:rw2, j in 1:rx2
+            right[k][q + (c - 1) * ranks2[k], j] = WAX2[k][c, j, q]
+        end
+        x_contract[k] = Matrix{T}(undef, b * rx1 * m, ranks2[k] * rw2)
+        a_input[k] = Matrix{T}(undef, m * ranks2[k], rw2 * b * rx1)
+        a_contract[k] = Matrix{T}(undef, ranks1[k] * n, rw2 * b * rx1)
+        left_input[k] = Matrix{T}(undef, rx1 * ranks1[k], n * rw2 * b)
+    end
+    xc = Matrix{T}(undef, b * rx1 * m, rx2)
+    return LocalMatvecWorkspace(
+        rx1, m, rx2, b, rw1, n, rw2, A, ranks1, ranks2, xc,
+        left, right, x_contract, a_input, a_contract, left_input,
+    )
+end
+
+function local_matvec!(w, x, workspace::LocalMatvecWorkspace{T}) where T
+    rx1 = workspace.rx1
+    m = workspace.m
+    rx2 = workspace.rx2
+    b = workspace.b
+    rw1 = workspace.rw1
+    n = workspace.n
+    rw2 = workspace.rw2
+
+    @inbounds for bi in 1:b, i in 1:rx1, mi in 1:m, j in 1:rx2
+        workspace.xc[bi + (i - 1) * b + (mi - 1) * b * rx1, j] =
+            x[
+                i + (mi - 1) * rx1 + (j - 1) * rx1 * m +
+                (bi - 1) * rx1 * m * rx2
+            ]
+    end
+
+    fill!(w, zero(T))
+    wmat = reshape(w, rw1, n * rw2 * b)
+    for k in eachindex(workspace.A)
+        r1 = workspace.ra1[k]
+        r2 = workspace.ra2[k]
+        x_contract = workspace.x_contract[k]
+        a_input = workspace.a_input[k]
+        a_contract = workspace.a_contract[k]
+        left_input = workspace.left_input[k]
+
+        mul!(x_contract, workspace.xc, transpose(workspace.right[k]))
+        @inbounds for bi in 1:b, i in 1:rx1, c in 1:rw2, q in 1:r2, mi in 1:m
+            a_input[mi + (q - 1) * m, c + (bi - 1) * rw2 + (i - 1) * rw2 * b] =
+                x_contract[
+                    bi + (i - 1) * b + (mi - 1) * b * rx1,
+                    q + (c - 1) * r2,
+                ]
+        end
+
+        Ak = workspace.A[k]
+        A2 = ndims(Ak) == 2 ? Ak : reshape(Ak, r1 * n, m * r2)
+        mul!(a_contract, A2, a_input)
+        @inbounds for bi in 1:b, c in 1:rw2, ni in 1:n, p in 1:r1, i in 1:rx1
+            left_input[i + (p - 1) * rx1, ni + (c - 1) * n + (bi - 1) * n * rw2] =
+                a_contract[p + (ni - 1) * r1, c + (bi - 1) * rw2 + (i - 1) * rw2 * b]
+        end
+        mul!(wmat, workspace.left[k], left_input, one(T), one(T))
+    end
+    return w
+end
+
 function local_matvec(x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, Ra, ra1, ra2)
     T = eltype(x)
     w = zeros(T, rw1 * n * rw2, b)
-    w4 = reshape(w, rw1, n, rw2, b)
-    x4 = reshape(x, rx1, m, rx2, b)
-    xmat = reshape(x, rx1 * m * rx2, b)
-    xc = reshape(PermutedDimsArray(xmat, (2, 1)), b * rx1 * m, rx2)
-    
-    # Pre-allocate buffers (will be resized as needed)
-    wk_buf = Matrix{T}(undef, 0, 0)
-    wk2_buf = Matrix{T}(undef, 0, 0)
-    wk3_buf = Matrix{T}(undef, 0, 0)
-    rows1 = b * rx1 * m
-    rows3 = rw1
-    
-    @inbounds for k in 1:Ra
-        WAX1k = WAX1[k]
-        WAX2k = WAX2[k]
-        # Julia shape: WAX1k is (rw1, rx1, ra1), WAX2k is (rw2, rx2, ra2)
-        if issparse(A[k]) ||
-           size(WAX1k, 1) != rw1 || size(WAX1k, 2) != rx1 || size(WAX1k, 3) != ra1[k] ||
-           size(WAX2k, 1) != rw2 || size(WAX2k, 2) != rx2 || size(WAX2k, 3) != ra2[k]
-            # WAX2 has shape (rw2, rx2, ra2), need to reshape to (ra2*rw2, rx2)
-            tmp = permutedims(WAX2[k], (3, 1, 2))  # (ra2, rw2, rx2)
-            tmp = reshape(tmp, :, rx2)  # (ra2*rw2, rx2)
-            cols1 = size(tmp, 1)
-            if size(wk_buf, 1) != rows1 || size(wk_buf, 2) != cols1
-                wk_buf = Matrix{T}(undef, rows1, cols1)
-            end
-            mul!(wk_buf, xc, transpose(tmp))
-            wk = wk_buf
-            wk = reshape(wk, b * rx1, m * ra2[k] * rw2)
-            wk = reshape(PermutedDimsArray(wk, (2, 1)), m * ra2[k], rw2 * b * rx1)
-            rows2 = size(A[k], 1)
-            cols2 = size(wk, 2)
-            if size(wk2_buf, 1) != rows2 || size(wk2_buf, 2) != cols2
-                wk2_buf = Matrix{T}(undef, rows2, cols2)
-            end
-            mul!(wk2_buf, A[k], wk)
-            wk = wk2_buf
-            wk = reshape(wk, :, rx1)
-            wk = reshape(PermutedDimsArray(wk, (2, 1)), rx1 * ra1[k], :)
-            tmp = reshape(WAX1[k], rw1, :)
-            cols3 = size(wk, 2)
-            if size(wk3_buf, 1) != rows3 || size(wk3_buf, 2) != cols3
-                wk3_buf = Matrix{T}(undef, rows3, cols3)
-            end
-            mul!(wk3_buf, tmp, wk)
-            wk = wk3_buf
-            wk = reshape(wk, :, b)
-            w .+= wk
-        else
-            A4 = ndims(A[k]) == 4 ? A[k] : reshape(A[k], ra1[k], n, m, ra2[k])
-            # WAX1k shape: (rw1, rx1, ra1)
-            # WAX2k shape: (rw2, rx2, ra2) - use directly without permutedims
-            # A4 shape: (ra1, n, m, ra2)
-            # x4 shape: (rx1, m, rx2, b)
-            # w4 shape: (rw1, n, rw2, b)
-            @tensor w4[rw1i, n_i, rw2i, bi] += WAX1k[rw1i, rx1i, ra1i] * A4[ra1i, n_i, m_i, ra2i] * x4[rx1i, m_i, rx2i, bi] * WAX2k[rw2i, rx2i, ra2i]
-        end
-    end
-    return w
+    workspace = LocalMatvecWorkspace(
+        x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, ra1, ra2,
+    )
+    return local_matvec!(w, x, workspace)
 end
 
 function assemble_local_matrix(WAX1::AbstractVector, A::AbstractVector, WAX2::AbstractVector)

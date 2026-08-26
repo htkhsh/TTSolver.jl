@@ -1,6 +1,112 @@
 using Test
 using LinearAlgebra
+using SparseArrays
 using TTSolver
+
+@testset "in-place local matvec" begin
+    rx1, m, rx2, b = 2, 3, 2, 2
+    rw1, n, rw2 = 2, 2, 2
+    ra1 = [1, 2]
+    ra2 = [2, 1]
+    Ra = length(ra1)
+
+    x = reshape(ComplexF64.(1:(rx1 * m * rx2 * b)), :, b) ./ 7
+    WAX1 = [
+        reshape(ComplexF64.(1:(rw1 * rx1 * ra1[k])), rw1, rx1, ra1[k]) ./ (3 + k)
+        for k in 1:Ra
+    ]
+    A = [
+        reshape(ComplexF64.(1:(ra1[k] * n * m * ra2[k])), ra1[k] * n, m * ra2[k]) ./ (5 + k)
+        for k in 1:Ra
+    ]
+    WAX2 = [
+        reshape(ComplexF64.(1:(rw2 * rx2 * ra2[k])), rw2, rx2, ra2[k]) ./ (7 + k)
+        for k in 1:Ra
+    ]
+
+    expected = zeros(ComplexF64, rw1, n, rw2, b)
+    x4 = reshape(x, rx1, m, rx2, b)
+    for k in 1:Ra, a in 1:rw1, ni in 1:n, c in 1:rw2, bi in 1:b,
+        i in 1:rx1, mi in 1:m, j in 1:rx2, p in 1:ra1[k], q in 1:ra2[k]
+        A4 = reshape(A[k], ra1[k], n, m, ra2[k])
+        expected[a, ni, c, bi] +=
+            WAX1[k][a, i, p] * A4[p, ni, mi, q] * x4[i, mi, j, bi] * WAX2[k][c, j, q]
+    end
+
+    workspace_defined = isdefined(TTSolver, :LocalMatvecWorkspace)
+    matvec_defined = isdefined(TTSolver, :local_matvec!)
+    @test workspace_defined
+    @test matvec_defined
+    if workspace_defined && matvec_defined
+        workspace = TTSolver.LocalMatvecWorkspace(
+            x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, ra1, ra2,
+        )
+        result = similar(x, rw1 * n * rw2, b)
+        returned = TTSolver.local_matvec!(result, x, workspace)
+
+        @test returned === result
+        @test reshape(result, rw1, n, rw2, b) ≈ expected rtol=1e-13
+        @test TTSolver.local_matvec(
+            x, rx1, m, rx2, b, rw1, n, rw2,
+            WAX1, A, WAX2, Ra, ra1, ra2,
+        ) ≈ result rtol=1e-13
+
+        sparse_workspace = TTSolver.LocalMatvecWorkspace(
+            x, rx1, m, rx2, b, rw1, n, rw2,
+            WAX1, sparse.(A), WAX2, ra1, ra2,
+        )
+        sparse_result = similar(result)
+        TTSolver.local_matvec!(sparse_result, x, sparse_workspace)
+        @test sparse_result ≈ result rtol=1e-13
+
+        TTSolver.local_matvec!(result, x, workspace)
+        allocated = @allocated begin
+            for _ in 1:10
+                TTSolver.local_matvec!(result, x, workspace)
+            end
+        end
+        @test allocated <= 4096
+    end
+end
+
+@testset "in-place BiCGSTAB" begin
+    A = ComplexF64[4 1-1im; 2+1im 3]
+    rhs = ComplexF64[1, 2-1im]
+    mvfun! = (dest, src) -> mul!(dest, A, src)
+
+    solver_defined = isdefined(TTSolver, :bicgstab_inplace)
+    @test solver_defined
+    if solver_defined
+        solution, flag, residual, _ = TTSolver.bicgstab_inplace(
+            mvfun!, rhs; tol=1e-12, maxiter=20,
+        )
+        @test flag == 0
+        @test residual <= 1e-12
+        @test solution ≈ A \ rhs rtol=1e-12
+    end
+end
+
+@testset "in-place BiCGSTAB reuses matvec outputs" begin
+    A = ComplexF64[
+        4 1 0 0 0 1;
+        2 5 1 0 0 0;
+        0 1 6 1 0 0;
+        0 0 2 7 1 0;
+        0 0 0 1 8 1;
+        1 0 0 0 2 9
+    ]
+    rhs = ComplexF64[1, 2, 3, 4, 5, 6]
+    destinations = Any[]
+    tracked_mvfun! = function (dest, src)
+        push!(destinations, dest)
+        return mul!(dest, A, src)
+    end
+
+    TTSolver.bicgstab_inplace(tracked_mvfun!, rhs; tol=0.0, maxiter=3)
+
+    @test length(destinations) > 2
+    @test length(unique(objectid.(destinations))) <= 2
+end
 
 @testset "basic TT constructors" begin
     x = tt_ones([2, 3])

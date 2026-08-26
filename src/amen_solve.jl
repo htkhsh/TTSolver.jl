@@ -233,7 +233,16 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
                 Ai[k] = reshape(Ai[k], ra1[k] * n[i], n[i] * ra2[k])
             end
         end
-        mvfun = xvec -> local_matvec(xvec, rx[i], n[i], rx[i + 1], 1, rx[i], n[i], rx[i + 1], XAX1, Ai, XAX2, Ra, ra1, ra2)
+        mvworkspace = LocalMatvecWorkspace(
+            sol_prev, rx[i], n[i], rx[i + 1], 1, rx[i], n[i], rx[i + 1],
+            XAX1, Ai, XAX2, ra1, ra2,
+        )
+        mvbuffer = similar(vec(sol_prev))
+        mvfun! = (dest, xvec) -> local_matvec!(dest, xvec, mvworkspace)
+        mvfun = function (xvec)
+            local_matvec!(mvbuffer, xvec, mvworkspace)
+            return mvbuffer
+        end
         resids[i] = norm(rhs - mvfun(sol_prev)) / norm_rhs
 
         if lociters > 0
@@ -253,14 +262,18 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
                 end
             else
                 tol_loc = max(loctol / resid_damp, eps(Float64) * 1e3)
-                sol, flg, _, _ = bicgstab(mvfun, rhs; x0=sol_prev, tol=tol_loc, maxiter=lociters)
+                sol, flg, _, _ = bicgstab_inplace(
+                    mvfun!, rhs; x0=sol_prev, tol=tol_loc, maxiter=lociters,
+                )
                 if flg > 0
                     precfun = nothing
                     if local_prec == "r"
                         P = assemble_local_rjacobi(XAX1, Ai, XAX2)
                         precfun = xvec -> local_precvec(xvec, rx[i], n[i], rx[i + 1], 1, P)
                     end
-                    sol, _, _, _ = bicgstab(mvfun, rhs; x0=sol, tol=tol_loc, maxiter=lociters, M=precfun)
+                    sol, _, _, _ = bicgstab_inplace(
+                        mvfun!, rhs; x0=sol, tol=tol_loc, maxiter=lociters, M=precfun,
+                    )
                 end
             end
         else
@@ -423,6 +436,55 @@ function bicgstab(mvfun, b; x0=nothing, tol=1e-6, maxiter=100, M=nothing)
         omega = dot(t, s) / dot(t, t)
         x = x + alpha * p_hat + omega * s_hat
         r = s - omega * t
+        if norm(r) < tol * res0
+            return x, 0, norm(r) / res0, iter
+        end
+        rho = rho_new
+    end
+    return x, 2, norm(r) / res0, maxiter
+end
+
+function bicgstab_inplace(mvfun!, b; x0=nothing, tol=1e-6, maxiter=100, M=nothing)
+    bvec = vec(b)
+    n = length(bvec)
+    x = x0 === nothing ? zeros(eltype(bvec), n) : copy(vec(x0))
+    r = similar(x)
+    r_hat = similar(x)
+    v = zeros(eltype(bvec), n)
+    p = zeros(eltype(bvec), n)
+    s = similar(x)
+    t = similar(x)
+
+    mvfun!(v, x)
+    @. r = bvec - v
+    copyto!(r_hat, r)
+    rho = one(eltype(bvec))
+    alpha = one(eltype(bvec))
+    omega = one(eltype(bvec))
+    res0 = norm(r)
+    if res0 == 0
+        return x, 0, 0.0, 0
+    end
+    for iter in 1:maxiter
+        rho_new = dot(r_hat, r)
+        if rho_new == 0
+            return x, 1, norm(r) / res0, iter
+        end
+        beta = (rho_new / rho) * (alpha / omega)
+        @. p = r + beta * (p - omega * v)
+        p_hat = M === nothing ? p : M(p)
+        mvfun!(v, p_hat)
+        alpha = rho_new / dot(r_hat, v)
+        @. s = r - alpha * v
+        if norm(s) < tol * res0
+            @. x = x + alpha * p_hat
+            return x, 0, norm(s) / res0, iter
+        end
+        s_hat = M === nothing ? s : M(s)
+        mvfun!(t, s_hat)
+        omega = dot(t, s) / dot(t, t)
+        @. x = x + alpha * p_hat + omega * s_hat
+        @. r = s - omega * t
         if norm(r) < tol * res0
             return x, 0, norm(r) / res0, iter
         end
