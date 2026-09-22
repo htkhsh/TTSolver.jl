@@ -1,6 +1,7 @@
 using Test
 using LinearAlgebra
 using SparseArrays
+using Random
 using TTSolver
 
 @testset "in-place local matvec" begin
@@ -165,6 +166,122 @@ end
     x_snap = extract_snapshot(X, t, 0.5, "cn")
     full = vec(tt_full(x_snap))
     @test full == [2.0, 2.0]
+end
+
+function keyword_tamen_problem()
+    state = TTTensor([reshape([1.0, 0.0], 1, 2, 1)])
+    space_time = tkron(state, tt_ones(3))
+    generator = TTMatrix([reshape(zeros(2, 2), 1, 2, 2, 1)])
+    observable = tt_ones(2)
+    options = Dict{Symbol,Any}(
+        :verb => 0,
+        :nswp => 1,
+        :local_iters => 2,
+        :time_scheme => "CN",
+    )
+    return space_time, generator, observable, options
+end
+
+@testset "tamen conserved-observable keyword validation" begin
+    X, A, observable, options = keyword_tamen_problem()
+
+    result = tamen(
+        X, A, 1e-5, copy(options);
+        conserved_observables=TTTensor[],
+        correct_2_norm=false,
+    )
+    @test length(result) == 5
+    legacy_empty = merge(copy(options), Dict(:obs => [observable]))
+    @test length(tamen(
+        X, A, 1e-5, legacy_empty;
+        conserved_observables=TTTensor[],
+    )) == 5
+
+    @test_throws ArgumentError tamen(
+        X, A, 1e-5, copy(options);
+        conserved_observables=observable,
+    )
+    @test_throws ArgumentError tamen(
+        X, A, 1e-5, copy(options);
+        conserved_observables=[ones(2)],
+    )
+    @test_throws DimensionMismatch tamen(
+        X, A, 1e-5, copy(options);
+        conserved_observables=[tt_ones(3)],
+    )
+    @test_throws ArgumentError tamen(
+        X, A, 1e-5, merge(copy(options), Dict(:obs => [observable]));
+        conserved_observables=[observable],
+    )
+    @test_throws ArgumentError tamen(
+        X, A, 1e-5,
+        merge(copy(options), Dict(:correct_2_norm => false));
+        correct_2_norm=false,
+    )
+    @test_throws ArgumentError tamen(
+        X, A, 1e-5, copy(options);
+        correct_2_norm=1,
+    )
+end
+
+function conservative_tamen_problem()
+    generator_dense = [
+        -1.0  0.5  0.0  0.0;
+         1.0 -0.5  0.0  0.0;
+         0.0  0.0 -0.2  0.4;
+         0.0  0.0  0.2 -0.4
+    ]
+    initial_dense = [0.8, 0.2, 0.3, 0.7]
+    initial = TTTensor([reshape(initial_dense, 1, 4, 1)])
+    generator = TTMatrix([reshape(generator_dense, 1, 4, 4, 1)])
+    first_mass = TTTensor([reshape([1.0, 1.0, 0.0, 0.0], 1, 4, 1)])
+    second_mass = TTTensor([reshape([0.0, 0.0, 1.0, 1.0], 1, 4, 1)])
+    return initial, generator, [first_mass, second_mass]
+end
+
+@testset "tamen conserved linear functionals" begin
+    initial, generator, observables = conservative_tamen_problem()
+    initial_values = [tt_dot(observable, initial) for observable in observables]
+
+    for scheme in ("cheb", "CN")
+        Random.seed!(20260922)
+        X = tkron(initial, tt_ones(5))
+        options = Dict{Symbol,Any}(
+            :verb => 0,
+            :nswp => 4,
+            :local_iters => 8,
+            :time_scheme => scheme,
+            :time_error_damp => 1e3,
+        )
+        U, time_grid, _, _, _ = tamen(
+            X, generator, 1e-6, options;
+            conserved_observables=observables,
+            correct_2_norm=false,
+        )
+        snapshots = extract_snapshot(U, time_grid, [0.0, 0.5, 1.0], scheme)
+        for snapshot in snapshots, (observable, initial_value) in zip(observables, initial_values)
+            @test tt_dot(observable, snapshot) ≈ initial_value atol=2e-5
+        end
+        @test abs(norm(last(snapshots)) - norm(initial)) > 1e-3
+    end
+end
+
+@testset "tamen legacy observable option" begin
+    initial, generator, observables = conservative_tamen_problem()
+    X = tkron(initial, tt_ones(5))
+    options = Dict{Symbol,Any}(
+        :verb => 0,
+        :nswp => 4,
+        :local_iters => 8,
+        :time_scheme => "CN",
+        :time_error_damp => 1e3,
+        :obs => [first(observables)],
+        :correct_2_norm => false,
+    )
+    U, time_grid, _, _, _ = tamen(X, generator, 1e-6, options)
+    final_state = extract_snapshot(U, time_grid, 1.0, "CN")
+    @test tt_dot(first(observables), final_state) ≈
+          tt_dot(first(observables), initial) atol=2e-5
 end
 
 @testset "tamen zero ode" begin
