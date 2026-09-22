@@ -162,9 +162,41 @@ function parse_rhs(Rhs, n::Vector{Int}, X::Matrix{Any}, t, vectype)
     return Rhsc, Rrhs, rrhs
 end
 
-function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing)
+function _normalize_conserved_observables(observables, dimensions::Vector{Int})
+    observables === nothing && return TTTensor[]
+    observables isa AbstractArray || throw(ArgumentError("conserved_observables must be an array of TTTensor objects"))
+    normalized = collect(observables)
+    for (index, observable) in pairs(normalized)
+        observable isa TTTensor || throw(ArgumentError("conserved_observables[$index] must be a TTTensor"))
+        tt_dims(observable) == dimensions || throw(DimensionMismatch("conserved_observables[$index] has dimensions $(tt_dims(observable)); expected $dimensions"))
+    end
+    return normalized
+end
+
+"""Solve a time-dependent TT linear system with optional conserved observables.
+
+`conserved_observables` is a keyword-only array of `TTTensor` vectors whose
+contractions are preserved by the solve.  `correct_2_norm` controls the legacy
+Euclidean-norm correction and defaults to the value in `opts` (or `true`).
+"""
+function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing;
+    conserved_observables=nothing, correct_2_norm=nothing)
     d, n, _, rx, vectype = check_vector(X, "x")
     d -= 1
+
+    dimensions = collect(Int, n[1:d])
+    normalized_observables = _normalize_conserved_observables(conserved_observables, dimensions)
+    if !isempty(normalized_observables)
+        if haskey(opts, :obs) && !(opts[:obs] === nothing || (opts[:obs] isa AbstractArray && isempty(opts[:obs])))
+            throw(ArgumentError("conserved_observables conflicts with opts[:obs]; provide only one"))
+        end
+        opts[:obs] = reshape(normalized_observables, 1, :)
+    end
+    if correct_2_norm !== nothing
+        correct_2_norm isa Bool || throw(ArgumentError("correct_2_norm must be a Bool"))
+        haskey(opts, :correct_2_norm) && throw(ArgumentError("correct_2_norm keyword conflicts with opts[:correct_2_norm]"))
+        opts[:correct_2_norm] = correct_2_norm
+    end
 
     if X isa AbstractMatrix && size(X, 2) > 1
         X = X[:, end:end]
