@@ -87,8 +87,14 @@ function amen_solve(A, y, tol, opts=Dict{Symbol,Any}(), x0=nothing, aux=nothing,
     ZY = nothing
 
     swp = 0
+    matvec_caches = AmenMatvecCaches(eltype(x[1, 1]))
+    environment_workspace = EnvironmentUpdateWorkspace(eltype(x[1, 1]))
+    bicgstab_cache = BiCGSTABCache(eltype(x[1, 1]))
     for s in 1:opts[:nswp]
-        x, rx, z, ZAX, ZY, opts, errs, resids, _, _, _ = amenany_sweep(x, A, y, z, tol, opts, ZAX, ZY, aux)
+        x, rx, z, ZAX, ZY, opts, errs, resids, _, _, _ = amenany_sweep(
+            x, A, y, z, tol, opts, ZAX, ZY, aux;
+            matvec_caches, environment_workspace, bicgstab_cache,
+        )
         swp = s
         max_err = maximum(errs)
         max_res = maximum(resids)
@@ -107,7 +113,9 @@ function amen_solve(A, y, tol, opts=Dict{Symbol,Any}(), x0=nothing, aux=nothing,
     return x, opts, swp, z
 end
 
-function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothing)
+function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing,
+    aux=nothing; matvec_caches=nothing, environment_workspace=nothing,
+    bicgstab_cache=nothing)
     d, n, _, rx, _ = check_vector(x, "x")
     _, _, Ra, ra = check_matrix(A, "a"; d=d, n=n)
     _, _, Ry, _ = check_vector(y, "y"; d=d, n=n)
@@ -137,6 +145,10 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
     local_prec = opts[:local_prec]::String
 
     T = eltype(x[1, 1])
+    matvec_caches === nothing && (matvec_caches = AmenMatvecCaches(T))
+    environment_workspace === nothing &&
+        (environment_workspace = EnvironmentUpdateWorkspace(T))
+    bicgstab_cache === nothing && (bicgstab_cache = BiCGSTABCache(T))
 
     XAX = Matrix{Array{T,3}}(undef, Ra, d + 1)
     XY = Matrix{Matrix{T}}(undef, Ry, d + 1)
@@ -188,7 +200,13 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
                         Ai[k] = reshape(Ai[k], ra[i, k] * n[i], n[i] * ra[i + 1, k])
                     end
                 end
-                crzAx = local_matvec(x[i, 1], rx[i], n[i], rx[i + 1], 1, rz[i], n[i], rz[i + 1], vec(ZAX[:, i]), Ai, vec(ZAX[:, i + 1]), Ra, ra[i, :], ra[i + 1, :])
+                crzAx = _cached_local_matvec!(
+                    matvec_caches.residual,
+                    x[i, 1], rx[i], n[i], rx[i + 1], 1,
+                    rz[i], n[i], rz[i + 1],
+                    vec(ZAX[:, i]), Ai, vec(ZAX[:, i + 1]),
+                    ra[i, :], ra[i + 1, :],
+                )
             end
             crz = crzy - crzAx
             crz = reshape(crz, rz[i], n[i] * rz[i + 1])
@@ -203,11 +221,23 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
 
         x[i - 1, 1], x[i, 1], rx[i] = orthogonalise_block(x[i - 1, 1], x[i, 1], -1)
 
-        XAX[:, i] = rightreduce_matrix(vec(XAX[:, i + 1]), x[i, 1], collect(A[i, :]), x[i, 1])
-        XY[:, i] = rightreduce_vector(vec(XY[:, i + 1]), x[i, 1], collect(y[i, :]))
+        rightreduce_matrix!(
+            view(XAX, :, i), view(XAX, :, i + 1), x[i, 1],
+            collect(A[i, :]), x[i, 1], environment_workspace,
+        )
+        rightreduce_vector!(
+            view(XY, :, i), view(XY, :, i + 1), x[i, 1],
+            collect(y[i, :]), environment_workspace,
+        )
         if Rz > 0
-            ZAX[:, i] = rightreduce_matrix(vec(ZAX[:, i + 1]), z[i, 1], collect(A[i, :]), x[i, 1])
-            ZY[:, i] = rightreduce_vector(vec(ZY[:, i + 1]), z[i, 1], collect(y[i, :]))
+            rightreduce_matrix!(
+                view(ZAX, :, i), view(ZAX, :, i + 1), z[i, 1],
+                collect(A[i, :]), x[i, 1], environment_workspace,
+            )
+            rightreduce_vector!(
+                view(ZY, :, i), view(ZY, :, i + 1), z[i, 1],
+                collect(y[i, :]), environment_workspace,
+            )
         end
     end
 
@@ -233,17 +263,34 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
                 Ai[k] = reshape(Ai[k], ra1[k] * n[i], n[i] * ra2[k])
             end
         end
-        mvworkspace = LocalMatvecWorkspace(
-            sol_prev, rx[i], n[i], rx[i + 1], 1, rx[i], n[i], rx[i + 1],
+        solve_cache = _matvec_cache_for(matvec_caches.solve, eltype(sol_prev))
+        mvworkspace = prepare_local_matvec!(
+            solve_cache,
+            sol_prev, rx[i], n[i], rx[i + 1], 1,
+            rx[i], n[i], rx[i + 1],
             XAX1, Ai, XAX2, ra1, ra2,
         )
-        mvbuffer = similar(vec(sol_prev))
+        mvbuffer = _matvec_storage!(solve_cache.output, length(sol_prev))
         mvfun! = (dest, xvec) -> local_matvec!(dest, xvec, mvworkspace)
         mvfun = function (xvec)
             local_matvec!(mvbuffer, xvec, mvworkspace)
             return mvbuffer
         end
-        resids[i] = norm(rhs - mvfun(sol_prev)) / norm_rhs
+        initial_residual = nothing
+        if lociters > 0 && !(length(sol_prev) < max_full_size)
+            sol = copy(vec(sol_prev))
+            bicgwork = prepare_bicgstab!(bicgstab_cache, sol, rhs)
+            if eltype(sol) === eltype(rhs)
+                initial_residual = _bicgstab_residual!(
+                    bicgwork, mvfun!, sol, rhs,
+                )
+                resids[i] = norm(initial_residual) / norm_rhs
+            else
+                resids[i] = norm(rhs - mvfun(sol_prev)) / norm_rhs
+            end
+        else
+            resids[i] = norm(rhs - mvfun(sol_prev)) / norm_rhs
+        end
 
         if lociters > 0
             if rx[i] * n[i] * rx[i + 1] < max_full_size
@@ -262,17 +309,21 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
                 end
             else
                 tol_loc = max(loctol / resid_damp, eps(Float64) * 1e3)
-                sol, flg, _, _ = bicgstab_inplace(
-                    mvfun!, rhs; x0=sol_prev, tol=tol_loc, maxiter=lociters,
+                sol, flg, _, _ = _bicgstab!(
+                    sol, mvfun!, rhs, bicgwork;
+                    initial_residual, tol=tol_loc, maxiter=lociters,
                 )
-                if flg > 0
+                if flg > 0 && _needs_local_restart!(
+                    bicgwork, mvfun!, sol, rhs, tol_loc,
+                )
                     precfun = nothing
                     if local_prec == "r"
                         P = assemble_local_rjacobi(XAX1, Ai, XAX2)
                         precfun = xvec -> local_precvec(xvec, rx[i], n[i], rx[i + 1], 1, P)
                     end
-                    sol, _, _, _ = bicgstab_inplace(
-                        mvfun!, rhs; x0=sol, tol=tol_loc, maxiter=lociters, M=precfun,
+                    sol, _, _, _ = _bicgstab!(
+                        sol, mvfun!, rhs, bicgwork;
+                        tol=tol_loc, maxiter=lociters, M=precfun,
                     )
                 end
             end
@@ -337,7 +388,13 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
 
         if Rz > 0
             crzy = assemble_local_vector(vec(ZY[:, i]), collect(y[i, :]), vec(ZY[:, i + 1]))
-            crzAx = local_matvec(reshape(sol, rx[i] * n[i] * rx[i + 1], 1), rx[i], n[i], rx[i + 1], 1, rz[i], n[i], rz[i + 1], vec(ZAX[:, i]), Ai, vec(ZAX[:, i + 1]), Ra, ra1, ra2)
+            crzAx = _cached_local_matvec!(
+                matvec_caches.residual,
+                reshape(sol, rx[i] * n[i] * rx[i + 1], 1),
+                rx[i], n[i], rx[i + 1], 1,
+                rz[i], n[i], rz[i + 1],
+                vec(ZAX[:, i]), Ai, vec(ZAX[:, i + 1]), ra1, ra2,
+            )
             crz = crzy - crzAx
             crz = reshape(crz, rz[i] * n[i], rz[i + 1])
             if kickrank2 > 0 && i < d
@@ -353,7 +410,13 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
         if i < d
             if Rz > 0
                 crzy = assemble_local_vector(vec(XY[:, i]), collect(y[i, :]), vec(ZY[:, i + 1]))
-                crzAx = local_matvec(reshape(sol, rx[i] * n[i] * rx[i + 1], 1), rx[i], n[i], rx[i + 1], 1, rx[i], n[i], rzold, XAX1, Ai, vec(ZAX[:, i + 1]), Ra, ra1, ra2)
+                crzAx = _cached_local_matvec!(
+                    matvec_caches.residual,
+                    reshape(sol, rx[i] * n[i] * rx[i + 1], 1),
+                    rx[i], n[i], rx[i + 1], 1,
+                    rx[i], n[i], rzold,
+                    XAX1, Ai, vec(ZAX[:, i + 1]), ra1, ra2,
+                )
                 crz = crzy - crzAx
                 crz = reshape(crz, rx[i] * n[i], rzold)
                 u = hcat(u, crz)
@@ -388,11 +451,23 @@ function amenany_sweep(x, A, y, z, tol, opts, ZAX=nothing, ZY=nothing, aux=nothi
             x[i + 1, 1] = reshape(cr2, rx[i + 1], n[i + 1], 1, rx[i + 2])
             x[i, 1] = reshape(u, rx[i], n[i], 1, rx[i + 1])
 
-            XAX[:, i + 1] = leftreduce_matrix(vec(XAX[:, i]), x[i, 1], Ai, x[i, 1])
-            XY[:, i + 1] = leftreduce_vector(vec(XY[:, i]), x[i, 1], collect(y[i, :]))
+            leftreduce_matrix!(
+                view(XAX, :, i + 1), view(XAX, :, i), x[i, 1],
+                Ai, x[i, 1], environment_workspace,
+            )
+            leftreduce_vector!(
+                view(XY, :, i + 1), view(XY, :, i), x[i, 1],
+                collect(y[i, :]), environment_workspace,
+            )
             if Rz > 0
-                ZAX[:, i + 1] = leftreduce_matrix(vec(ZAX[:, i]), z[i, 1], Ai, x[i, 1])
-                ZY[:, i + 1] = leftreduce_vector(vec(ZY[:, i]), z[i, 1], collect(y[i, :]))
+                leftreduce_matrix!(
+                    view(ZAX, :, i + 1), view(ZAX, :, i), z[i, 1],
+                    Ai, x[i, 1], environment_workspace,
+                )
+                leftreduce_vector!(
+                    view(ZY, :, i + 1), view(ZY, :, i), z[i, 1],
+                    collect(y[i, :]), environment_workspace,
+                )
             end
         else
             x[i, 1] = reshape(sol, rx[i], n[i], 1, rx[i + 1])

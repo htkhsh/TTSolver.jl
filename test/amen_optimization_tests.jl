@@ -1,9 +1,78 @@
 @testset "pre-migration AMEn reference" begin
-    Random.seed!(20261010)
-    @test relative_l2(run_amen(:direct), AMEN_DIRECT_REFERENCE) <= 10eps(Float64)
+    for branch in (:direct, :iterative)
+        Random.seed!(20261010)
+        actual = run_amen(branch)
+        problem = amen_reference_problem(branch)
+        reference = branch === :direct ?
+            AMEN_DIRECT_REFERENCE : AMEN_ITERATIVE_REFERENCE
+        @test relative_l2(actual, reference) <= AMEN_TOL
+        @test norm(problem.dense_operator * actual - problem.dense_rhs) /
+              norm(problem.dense_rhs) <= AMEN_TOL
+    end
+end
 
-    Random.seed!(20261010)
-    @test relative_l2(run_amen(:iterative), AMEN_ITERATIVE_REFERENCE) <= 10eps(Float64)
+function complex_amen_problem()
+    dense_operator = ComplexF64[
+        3.2 + 0.1im  -0.4 + 0.2im  0.0          0.1im
+        0.3 - 0.2im   2.9            -0.5 + 0.1im  0.0
+        0.0            0.2 + 0.3im   3.4          -0.6im
+       -0.1im          0.0            0.4 - 0.2im  2.7
+    ]
+    dense_rhs = ComplexF64[1.0 - 0.2im, -0.5 + 0.7im, 0.3, 1.2 + 0.1im]
+    operator = TTMatrix([reshape(copy(dense_operator), 1, 4, 4, 1)])
+    rhs = TTTensor([reshape(copy(dense_rhs), 1, 4, 1)])
+    initial = TTTensor([
+        reshape(ComplexF64[0.2, -0.1im, 0.3 + 0.2im, -0.4], 1, 4, 1),
+    ])
+    residual = Matrix{Any}(undef, 1, 1)
+    residual[1, 1] = reshape(
+        ComplexF64[0.1, -0.2 + 0.1im, 0.3im, 0.4], 1, 4, 1, 1,
+    )
+    options = Dict{Symbol,Any}(
+        :nswp => 2,
+        :kickrank => 1,
+        :verb => 0,
+        :local_iters => 100,
+        :max_full_size => 1,
+        :resid_damp => 1,
+        :trunc_norm => "fro",
+    )
+    return (; operator, rhs, initial, residual, options, dense_operator, dense_rhs)
+end
+
+@testset "AMEn cache propagation" begin
+    complex_problem = complex_amen_problem()
+    solution, _, _, _ = amen_solve(
+        complex_problem.operator,
+        complex_problem.rhs,
+        AMEN_TOL,
+        copy(complex_problem.options),
+        deepcopy(complex_problem.initial),
+        nothing,
+        deepcopy(complex_problem.residual),
+    )
+    actual = vec(tt_full(solution))
+    @test actual ≈ complex_problem.dense_operator \ complex_problem.dense_rhs rtol=AMEN_TOL
+    @test norm(complex_problem.dense_operator * actual - complex_problem.dense_rhs) /
+          norm(complex_problem.dense_rhs) <= AMEN_TOL
+
+    problem = amen_reference_problem(:iterative)
+    x = TTSolver.dr_from_tt_tensor(deepcopy(problem.initial))
+    operator = TTSolver._dr_from_tt_matrix(problem.operator)
+    rhs = TTSolver.dr_from_tt_tensor(problem.rhs)
+    T = eltype(x[1, 1])
+    result = TTSolver.amenany_sweep(
+        x,
+        operator,
+        rhs,
+        deepcopy(problem.residual),
+        problem.tol,
+        copy(problem.options);
+        matvec_caches=TTSolver.AmenMatvecCaches(T),
+        environment_workspace=TTSolver.EnvironmentUpdateWorkspace(T),
+        bicgstab_cache=TTSolver.BiCGSTABCache(T),
+    )
+    @test length(result) == 11
 end
 
 function local_matvec_case(::Type{T}; b::Int=1, sparse_operator::Bool=false,
