@@ -4,6 +4,46 @@ using SparseArrays
 using Random
 using TTSolver
 
+@testset "tt_round preserves tensor scale" begin
+    tolerance = 0.1
+
+    @testset "rank-one real tensor" begin
+        x = TTTensor([
+            reshape([1.0, 1.0], 1, 2, 1),
+            reshape([1.0, 1.0, 1.0], 1, 3, 1),
+        ])
+
+        @test tt_full(tt_round(x, tolerance)) ≈ tt_full(x) rtol=1e-14 atol=1e-14
+    end
+
+    @testset "zero tensor" begin
+        x = TTTensor([
+            reshape([0.0, 0.0], 1, 2, 1),
+            reshape([1.0, 1.0, 1.0], 1, 3, 1),
+        ])
+
+        @test all(iszero, tt_full(tt_round(x, tolerance)))
+    end
+
+    @testset "rank-one TT matrix" begin
+        A = TTMatrix([
+            reshape([1.0, 2.0, 3.0, 4.0], 1, 2, 2, 1),
+            reshape([1.0, 0.0, 0.0, 1.0], 1, 2, 2, 1),
+        ])
+
+        @test tt_full(tt_round(A, tolerance)) ≈ tt_full(A) rtol=1e-14 atol=1e-14
+    end
+
+    @testset "rank-one complex tensor" begin
+        x = TTTensor([
+            reshape(ComplexF64[1 + 2im, -0.5im], 1, 2, 1),
+            reshape(ComplexF64[2 - im, -1 + 0.25im], 1, 2, 1),
+        ])
+
+        @test tt_full(tt_round(x, tolerance)) ≈ tt_full(x) rtol=1e-14 atol=1e-14
+    end
+end
+
 @testset "in-place local matvec" begin
     rx1, m, rx2, b = 2, 3, 2, 2
     rw1, n, rw2 = 2, 2, 2

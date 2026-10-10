@@ -254,9 +254,9 @@ function tt_round(x::TTTensor{T}, eps::Real; rmax::Int=typemax(Int)) where T
         cores[1] = cores[1] ./ nrms[1]
     end
     
-    # Balance norms across all cores
-    log_nrm = sum(log.(abs.(nrms) .+ eps))
-    nrm_balanced = exp(log_nrm / d)
+    # Restore only the measured scale; the truncation tolerance must not add gain.
+    # Handle an exact zero separately and balance nonzero scales in log space.
+    nrm_balanced = any(iszero, nrms) ? zero(eltype(nrms)) : exp(sum(log, nrms) / d)
     for i in 1:d
         cores[i] = cores[i] .* nrm_balanced
     end
@@ -335,9 +335,9 @@ function tt_round(A::TTMatrix{T}, eps::Real; rmax::Int=typemax(Int)) where T
         cores[1] = cores[1] ./ nrms[1]
     end
     
-    # Balance norms across all cores
-    log_nrm = sum(log.(abs.(nrms) .+ eps))
-    nrm_balanced = exp(log_nrm / d)
+    # Restore only the measured scale; the truncation tolerance must not add gain.
+    # Handle an exact zero separately and balance nonzero scales in log space.
+    nrm_balanced = any(iszero, nrms) ? zero(eltype(nrms)) : exp(sum(log, nrms) / d)
     for i in 1:d
         cores[i] = cores[i] .* nrm_balanced
     end
