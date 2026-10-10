@@ -27,7 +27,8 @@ function orthogonalise_block(x_next, x, dir::Integer)
             xnext = reshape(xnext, rx0, n0, 1, size(R, 1))
             x_next = xnext
         end
-        x_new = transpose(Q)
+        # Materialize the transpose so subsequent reshapes remain BLAS-compatible.
+        x_new = copy(transpose(Q))
         x_new = reshape(x_new, size(Q, 2), n1, 1, rx2)
         return x_next, x_new, size(Q, 2)
     end
@@ -125,7 +126,7 @@ function rightreduce_matrix(WAX2::AbstractVector, w::AbstractArray, A::AbstractV
     return WAX1
 end
 
-struct LocalMatvecWorkspace{T,TA}
+struct LocalMatvecWorkspace{T,TA,TM<:AbstractMatrix{T}}
     rx1::Int
     m::Int
     rx2::Int
@@ -136,13 +137,185 @@ struct LocalMatvecWorkspace{T,TA}
     A::TA
     ra1::Vector{Int}
     ra2::Vector{Int}
-    xc::Matrix{T}
-    left::Vector{Matrix{T}}
-    right::Vector{Matrix{T}}
-    x_contract::Vector{Matrix{T}}
-    a_input::Vector{Matrix{T}}
-    a_contract::Vector{Matrix{T}}
-    left_input::Vector{Matrix{T}}
+    xc::TM
+    left::Vector{TM}
+    right::Vector{TM}
+    x_contract::Vector{TM}
+    a_input::Vector{TM}
+    a_contract::Vector{TM}
+    left_input::Vector{TM}
+    x_permutation_input::Vector{TM}
+    a_permutation_output::Vector{TM}
+    a_permutation_input::Vector{TM}
+    identity_permutation_input::Vector{TM}
+    left_permutation_output::Vector{TM}
+    identity_terms::Vector{Bool}
+end
+
+function _is_local_identity(A, ::Type{T}, r1, r2, n, m) where T
+    r1 == r2 == 1 && n == m && eltype(A) === T || return false
+    T in (Float32, Float64, ComplexF32, ComplexF64) || return false
+    (ndims(A) == 2 && size(A) == (n, n) ||
+     ndims(A) == 4 && size(A) == (1, n, n, 1)) || return false
+    matrix = reshape(A, n, n)
+    for j in 1:n, i in 1:n
+        matrix[i, j] == (i == j ? one(T) : zero(T)) || return false
+    end
+    return true
+end
+
+mutable struct LocalMatvecBuffer{T}
+    data::Vector{T}
+end
+
+LocalMatvecBuffer(::Type{T}) where T = LocalMatvecBuffer(T[])
+
+struct LocalMatvecTermBuffers{T}
+    left::LocalMatvecBuffer{T}
+    right::LocalMatvecBuffer{T}
+    x_contract::LocalMatvecBuffer{T}
+    a_input::LocalMatvecBuffer{T}
+    a_contract::LocalMatvecBuffer{T}
+    left_input::LocalMatvecBuffer{T}
+end
+
+LocalMatvecTermBuffers(::Type{T}) where T =
+    LocalMatvecTermBuffers(ntuple(_ -> LocalMatvecBuffer(T), 6)...)
+
+"""Reusable storage for one sequential stream of local matrix-vector products."""
+struct LocalMatvecCache{T}
+    xc::LocalMatvecBuffer{T}
+    terms::Vector{LocalMatvecTermBuffers{T}}
+    output::LocalMatvecBuffer{T}
+    other_types::Dict{DataType,Any}
+end
+
+LocalMatvecCache(::Type{T}) where T = LocalMatvecCache(
+    LocalMatvecBuffer(T),
+    LocalMatvecTermBuffers{T}[],
+    LocalMatvecBuffer(T),
+    Dict{DataType,Any}(),
+)
+
+_matvec_cache_for(cache::LocalMatvecCache{T}, ::Type{T}) where T = cache
+
+function _matvec_cache_for(cache::LocalMatvecCache, ::Type{T}) where T
+    return get!(cache.other_types, T) do
+        LocalMatvecCache(T)
+    end::LocalMatvecCache{T}
+end
+
+struct AmenMatvecCaches{T}
+    solve::LocalMatvecCache{T}
+    residual::LocalMatvecCache{T}
+end
+
+AmenMatvecCaches(::Type{T}) where T =
+    AmenMatvecCaches(LocalMatvecCache(T), LocalMatvecCache(T))
+
+function _matvec_storage!(buffer::LocalMatvecBuffer{T}, required::Int) where T
+    required >= 0 || throw(DimensionMismatch("negative buffer size"))
+    capacity = length(buffer.data)
+    if required > capacity
+        buffer.data = Vector{T}(undef, max(required, capacity + cld(capacity, 2)))
+    end
+    return view(buffer.data, 1:required)
+end
+
+_matvec_matrix!(buffer, rows, columns) =
+    reshape(_matvec_storage!(buffer, rows * columns), rows, columns)
+
+"""
+    prepare_local_matvec!(cache, x, rx1, m, rx2, b, rw1, n, rw2,
+        WAX1, A, WAX2, ra1, ra2)
+
+Refresh operator data and bind active matrix views to cached storage. Preparing
+the same cache again invalidates the returned workspace and borrowed output.
+"""
+function prepare_local_matvec!(cache::LocalMatvecCache{T}, x,
+    rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, ra1, ra2) where T
+    if eltype(x) !== T
+        return prepare_local_matvec!(_matvec_cache_for(cache, eltype(x)), x,
+            rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, ra1, ra2)
+    end
+    all(>=(0), (rx1, m, rx2, b, rw1, n, rw2)) ||
+        throw(DimensionMismatch("negative local dimension"))
+    length(x) == rx1 * m * rx2 * b ||
+        throw(DimensionMismatch("local input size mismatch"))
+    Ra = length(A)
+    length(WAX1) == length(WAX2) == length(ra1) == length(ra2) == Ra ||
+        throw(DimensionMismatch("local operator term counts differ"))
+    ranks1, ranks2 = Int.(ra1), Int.(ra2)
+    for k in 1:Ra
+        r1, r2 = ranks1[k], ranks2[k]
+        r1 >= 0 && r2 >= 0 || throw(DimensionMismatch("negative operator rank"))
+        size(WAX1[k]) == (rw1, rx1, r1) ||
+            throw(DimensionMismatch("left environment size mismatch"))
+        size(WAX2[k]) == (rw2, rx2, r2) ||
+            throw(DimensionMismatch("right environment size mismatch"))
+        expected = ndims(A[k]) == 2 ? (r1 * n, m * r2) : (r1, n, m, r2)
+        size(A[k]) == expected ||
+            throw(DimensionMismatch("local operator size mismatch"))
+    end
+    while length(cache.terms) < Ra
+        push!(cache.terms, LocalMatvecTermBuffers(T))
+    end
+    xc = _matvec_matrix!(cache.xc, b * rx1 * m, rx2)
+    left, right, x_contract, a_input, a_contract, left_input =
+        ntuple(_ -> Vector{typeof(xc)}(undef, Ra), 6)
+    for k in 1:Ra
+        buffers = cache.terms[k]
+        r1, r2 = ranks1[k], ranks2[k]
+        left[k] = _matvec_matrix!(buffers.left, rw1, rx1 * r1)
+        copyto!(left[k], WAX1[k])
+        right[k] = _matvec_matrix!(buffers.right, r2 * rw2, rx2)
+        @inbounds for q in 1:r2, c in 1:rw2, j in 1:rx2
+            right[k][q + (c - 1) * r2, j] = WAX2[k][c, j, q]
+        end
+        x_contract[k] =
+            _matvec_matrix!(buffers.x_contract, b * rx1 * m, r2 * rw2)
+        a_input[k] =
+            _matvec_matrix!(buffers.a_input, m * r2, rw2 * b * rx1)
+        a_contract[k] =
+            _matvec_matrix!(buffers.a_contract, r1 * n, rw2 * b * rx1)
+        left_input[k] =
+            _matvec_matrix!(buffers.left_input, rx1 * r1, n * rw2 * b)
+    end
+    identity_terms = [
+        _is_local_identity(A[k], T, ranks1[k], ranks2[k], n, m) for k in 1:Ra
+    ]
+    x_permutation_input, a_permutation_output, a_permutation_input,
+        identity_permutation_input, left_permutation_output =
+        ntuple(_ -> Vector{typeof(xc)}(undef, Ra), 5)
+    for k in 1:Ra
+        r1, r2 = ranks1[k], ranks2[k]
+        rows = b * rx1
+        columns = m * r2 * rw2
+        x_permutation_input[k] = reshape(x_contract[k], rows, columns)
+        a_permutation_output[k] = reshape(a_input[k], columns, rows)
+        a_permutation_input[k] =
+            reshape(a_contract[k], r1 * n * rw2 * b, rx1)
+        identity_permutation_input[k] = identity_terms[k] ?
+            reshape(a_input[k], r1 * n * rw2 * b, rx1) :
+            a_permutation_input[k]
+        left_permutation_output[k] =
+            reshape(left_input[k], rx1, r1 * n * rw2 * b)
+    end
+    return LocalMatvecWorkspace(
+        rx1, m, rx2, b, rw1, n, rw2, A, ranks1, ranks2, xc,
+        left, right, x_contract, a_input, a_contract, left_input,
+        x_permutation_input, a_permutation_output, a_permutation_input,
+        identity_permutation_input, left_permutation_output, identity_terms,
+    )
+end
+
+function _cached_local_matvec!(cache, x, rx1, m, rx2, b, rw1, n, rw2,
+    WAX1, A, WAX2, ra1, ra2)
+    bank = _matvec_cache_for(cache, eltype(x))
+    workspace = prepare_local_matvec!(bank, x, rx1, m, rx2, b, rw1, n, rw2,
+        WAX1, A, WAX2, ra1, ra2)
+    w = _matvec_matrix!(bank.output, rw1 * n * rw2, b)
+    return local_matvec!(w, x, workspace)
 end
 
 function LocalMatvecWorkspace(x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, ra1, ra2)
@@ -168,10 +341,47 @@ function LocalMatvecWorkspace(x, rx1, m, rx2, b, rw1, n, rw2, WAX1, A, WAX2, ra1
         left_input[k] = Matrix{T}(undef, rx1 * ranks1[k], n * rw2 * b)
     end
     xc = Matrix{T}(undef, b * rx1 * m, rx2)
+    identity_terms = [
+        _is_local_identity(A[k], T, ranks1[k], ranks2[k], n, m) for k in 1:Ra
+    ]
+    x_permutation_input, a_permutation_output, a_permutation_input,
+        identity_permutation_input, left_permutation_output =
+        ntuple(_ -> Vector{Matrix{T}}(undef, Ra), 5)
+    for k in 1:Ra
+        r1, r2 = ranks1[k], ranks2[k]
+        rows = b * rx1
+        columns = m * r2 * rw2
+        x_permutation_input[k] = reshape(x_contract[k], rows, columns)
+        a_permutation_output[k] = reshape(a_input[k], columns, rows)
+        a_permutation_input[k] =
+            reshape(a_contract[k], r1 * n * rw2 * b, rx1)
+        identity_permutation_input[k] = identity_terms[k] ?
+            reshape(a_input[k], r1 * n * rw2 * b, rx1) :
+            a_permutation_input[k]
+        left_permutation_output[k] =
+            reshape(left_input[k], rx1, r1 * n * rw2 * b)
+    end
     return LocalMatvecWorkspace(
         rx1, m, rx2, b, rw1, n, rw2, A, ranks1, ranks2, xc,
         left, right, x_contract, a_input, a_contract, left_input,
+        x_permutation_input, a_permutation_output, a_permutation_input,
+        identity_permutation_input, left_permutation_output, identity_terms,
     )
+end
+
+function _pack_local_input!(xc, x, rx1, m, rx2, b)
+    if b == 1
+        copyto!(xc, 1, x, 1, rx1 * m * rx2)
+    else
+        @inbounds for bi in 1:b, i in 1:rx1, mi in 1:m, j in 1:rx2
+            xc[bi + (i - 1) * b + (mi - 1) * b * rx1, j] =
+                x[
+                    i + (mi - 1) * rx1 + (j - 1) * rx1 * m +
+                    (bi - 1) * rx1 * m * rx2
+                ]
+        end
+    end
+    return xc
 end
 
 function local_matvec!(w, x, workspace::LocalMatvecWorkspace{T}) where T
@@ -183,13 +393,7 @@ function local_matvec!(w, x, workspace::LocalMatvecWorkspace{T}) where T
     n = workspace.n
     rw2 = workspace.rw2
 
-    @inbounds for bi in 1:b, i in 1:rx1, mi in 1:m, j in 1:rx2
-        workspace.xc[bi + (i - 1) * b + (mi - 1) * b * rx1, j] =
-            x[
-                i + (mi - 1) * rx1 + (j - 1) * rx1 * m +
-                (bi - 1) * rx1 * m * rx2
-            ]
-    end
+    _pack_local_input!(workspace.xc, x, rx1, m, rx2, b)
 
     fill!(w, zero(T))
     wmat = reshape(w, rw1, n * rw2 * b)
@@ -202,21 +406,23 @@ function local_matvec!(w, x, workspace::LocalMatvecWorkspace{T}) where T
         left_input = workspace.left_input[k]
 
         mul!(x_contract, workspace.xc, transpose(workspace.right[k]))
-        @inbounds for bi in 1:b, i in 1:rx1, c in 1:rw2, q in 1:r2, mi in 1:m
-            a_input[mi + (q - 1) * m, c + (bi - 1) * rw2 + (i - 1) * rw2 * b] =
-                x_contract[
-                    bi + (i - 1) * b + (mi - 1) * b * rx1,
-                    q + (c - 1) * r2,
-                ]
-        end
+        transpose!(
+            workspace.a_permutation_output[k],
+            workspace.x_permutation_input[k],
+        )
 
-        Ak = workspace.A[k]
-        A2 = ndims(Ak) == 2 ? Ak : reshape(Ak, r1 * n, m * r2)
-        mul!(a_contract, A2, a_input)
-        @inbounds for bi in 1:b, c in 1:rw2, ni in 1:n, p in 1:r1, i in 1:rx1
-            left_input[i + (p - 1) * rx1, ni + (c - 1) * n + (bi - 1) * n * rw2] =
-                a_contract[p + (ni - 1) * r1, c + (bi - 1) * rw2 + (i - 1) * rw2 * b]
+        if workspace.identity_terms[k] && all(isfinite, a_input)
+            contracted_permutation_input = workspace.identity_permutation_input[k]
+        else
+            Ak = workspace.A[k]
+            A2 = ndims(Ak) == 2 ? Ak : reshape(Ak, r1 * n, m * r2)
+            mul!(a_contract, A2, a_input)
+            contracted_permutation_input = workspace.a_permutation_input[k]
         end
+        transpose!(
+            workspace.left_permutation_output[k],
+            contracted_permutation_input,
+        )
         mul!(wmat, workspace.left[k], left_input, one(T), one(T))
     end
     return w
