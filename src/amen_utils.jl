@@ -133,6 +133,66 @@ end
 _matvec_matrix!(buffer, rows, columns) =
     reshape(_matvec_storage!(buffer, rows * columns), rows, columns)
 
+struct BiCGSTABWorkspace{TX<:AbstractVector,TB<:AbstractVector}
+    r::TX
+    r_hat::TX
+    p::TB
+    v::TB
+    s::TX
+    t::TX
+end
+
+"""Grow-only recurrence storage for sequential local BiCGSTAB solves."""
+struct BiCGSTABCache{Tx,Tb}
+    r::LocalMatvecBuffer{Tx}
+    r_hat::LocalMatvecBuffer{Tx}
+    p::LocalMatvecBuffer{Tb}
+    v::LocalMatvecBuffer{Tb}
+    s::LocalMatvecBuffer{Tx}
+    t::LocalMatvecBuffer{Tx}
+    other_types::Dict{Tuple{DataType,DataType},Any}
+end
+
+BiCGSTABCache(::Type{Tx}, ::Type{Tb}=Tx) where {Tx,Tb} = BiCGSTABCache(
+    LocalMatvecBuffer(Tx),
+    LocalMatvecBuffer(Tx),
+    LocalMatvecBuffer(Tb),
+    LocalMatvecBuffer(Tb),
+    LocalMatvecBuffer(Tx),
+    LocalMatvecBuffer(Tx),
+    Dict{Tuple{DataType,DataType},Any}(),
+)
+
+_bicgstab_cache_for(
+    cache::BiCGSTABCache{Tx,Tb}, ::Type{Tx}, ::Type{Tb},
+) where {Tx,Tb} = cache
+
+function _bicgstab_cache_for(
+    cache::BiCGSTABCache, ::Type{Tx}, ::Type{Tb},
+) where {Tx,Tb}
+    return get!(cache.other_types, (Tx, Tb)) do
+        BiCGSTABCache(Tx, Tb)
+    end::BiCGSTABCache{Tx,Tb}
+end
+
+function prepare_bicgstab!(cache::BiCGSTABCache, x, b)
+    length(x) == length(b) ||
+        throw(DimensionMismatch("BiCGSTAB vector lengths differ"))
+    bank = _bicgstab_cache_for(cache, eltype(x), eltype(b))
+    return _prepare_bicgstab!(bank, length(x))
+end
+
+function _prepare_bicgstab!(bank::BiCGSTABCache, n::Int)
+    return BiCGSTABWorkspace(
+        _matvec_storage!(bank.r, n),
+        _matvec_storage!(bank.r_hat, n),
+        _matvec_storage!(bank.p, n),
+        _matvec_storage!(bank.v, n),
+        _matvec_storage!(bank.s, n),
+        _matvec_storage!(bank.t, n),
+    )
+end
+
 struct EnvironmentUpdateBuffers{T}
     first::LocalMatvecBuffer{T}
     second::LocalMatvecBuffer{T}

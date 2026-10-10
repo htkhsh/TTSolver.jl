@@ -353,3 +353,143 @@ end
     cached, allocating = environment_allocation_counts(base)
     @test cached < allocating
 end
+
+function check_bicgstab_variants(A, rhs, x0)
+    mvfun = x -> A * x
+    mvfun! = (dest, x) -> mul!(dest, A, x)
+    expected = A \ rhs
+
+    allocating = TTSolver.bicgstab(
+        mvfun, rhs; x0, tol=1e-12, maxiter=100,
+    )
+    inplace = TTSolver.bicgstab_inplace(
+        mvfun!, rhs; x0, tol=1e-12, maxiter=100,
+    )
+
+    for result in (allocating, inplace)
+        solution, flag, reported_relres, _ = result
+        true_relres = norm(rhs - A * solution) / norm(rhs)
+        @test flag == 0
+        @test solution ≈ expected rtol=1e-12 atol=1e-12
+        @test reported_relres ≈ true_relres atol=1e-14
+    end
+
+    expected_initial_relres = norm(rhs - A * x0) / norm(rhs)
+    stopped_allocating = TTSolver.bicgstab(
+        mvfun, rhs; x0, tol=0.0, maxiter=0,
+    )
+    stopped_inplace = TTSolver.bicgstab_inplace(
+        mvfun!, rhs; x0, tol=0.0, maxiter=0,
+    )
+    @test stopped_allocating[3] ≈ expected_initial_relres rtol=1e-14
+    @test stopped_inplace[3] ≈ expected_initial_relres rtol=1e-14
+
+    cache = TTSolver.BiCGSTABCache(eltype(x0), eltype(rhs))
+    cached_x = copy(x0)
+    work = TTSolver.prepare_bicgstab!(cache, cached_x, rhs)
+    cached = TTSolver._bicgstab!(
+        cached_x, mvfun!, rhs, work; tol=1e-12, maxiter=100,
+    )
+    solution, flag, reported_relres, _ = cached
+    true_relres = norm(rhs - A * solution) / norm(rhs)
+    @test flag == 0
+    @test solution ≈ expected rtol=1e-12 atol=1e-12
+    @test reported_relres ≈ true_relres atol=1e-14
+    return cache, cached
+end
+
+@testset "RHS-relative cached BiCGSTAB" begin
+    real_A = [
+        4.0  1.0  0.0 -0.2
+       -0.5  3.5  0.4  0.0
+        0.0 -0.3  2.8  0.7
+        0.2  0.0 -0.6  3.2
+    ]
+    real_rhs = [1.0, -2.0, 0.5, 1.5]
+    real_x0 = [0.3, -0.2, 0.1, 0.4]
+    real_cache, real_result = check_bicgstab_variants(real_A, real_rhs, real_x0)
+
+    complex_A = ComplexF64[
+        3.0 + 0.2im  -0.4 + 0.1im  0.2
+        0.5 - 0.3im   2.7            -0.1im
+        0.0 + 0.2im   0.6 - 0.1im   3.4
+    ]
+    complex_rhs = ComplexF64[1.0 - 0.2im, -0.5 + 0.7im, 1.2 + 0.1im]
+    complex_x0 = ComplexF64[0.1im, -0.2, 0.3 - 0.1im]
+    check_bicgstab_variants(complex_A, complex_rhs, complex_x0)
+
+    identity3 = Matrix{Float64}(I, 3, 3)
+    zero_rhs = zeros(3)
+    zero_mv = x -> identity3 * x
+    zero_mv! = (dest, x) -> mul!(dest, identity3, x)
+    zero_allocating = TTSolver.bicgstab(
+        zero_mv, zero_rhs; x0=zeros(3), maxiter=0,
+    )
+    zero_inplace = TTSolver.bicgstab_inplace(
+        zero_mv!, zero_rhs; x0=zeros(3), maxiter=0,
+    )
+    zero_cache = TTSolver.BiCGSTABCache(Float64)
+    zero_x = zeros(3)
+    zero_work = TTSolver.prepare_bicgstab!(zero_cache, zero_x, zero_rhs)
+    zero_cached = TTSolver._bicgstab!(
+        zero_x, zero_mv!, zero_rhs, zero_work; maxiter=0,
+    )
+    @test all(result -> result[3] == 0.0, (zero_allocating, zero_inplace, zero_cached))
+
+    nonzero_x0 = ones(3)
+    nonzero_allocating = TTSolver.bicgstab(
+        zero_mv, zero_rhs; x0=nonzero_x0, maxiter=0,
+    )
+    nonzero_inplace = TTSolver.bicgstab_inplace(
+        zero_mv!, zero_rhs; x0=nonzero_x0, maxiter=0,
+    )
+    nonzero_x = copy(nonzero_x0)
+    nonzero_work = TTSolver.prepare_bicgstab!(zero_cache, nonzero_x, zero_rhs)
+    nonzero_cached = TTSolver._bicgstab!(
+        nonzero_x, zero_mv!, zero_rhs, nonzero_work; maxiter=0,
+    )
+    @test all(
+        result -> isinf(result[3]),
+        (nonzero_allocating, nonzero_inplace, nonzero_cached),
+    )
+
+    mixed_rhs = Float32[1, -2, 3]
+    mixed_x = zeros(Float64, 3)
+    mixed_cache = TTSolver.BiCGSTABCache(Float64, Float32)
+    mixed_work = TTSolver.prepare_bicgstab!(mixed_cache, mixed_x, mixed_rhs)
+    mixed_result = TTSolver._bicgstab!(
+        mixed_x, zero_mv!, mixed_rhs, mixed_work; tol=1e-7, maxiter=10,
+    )
+    @test eltype(mixed_result[1]) === Float64
+    @test eltype(mixed_work.r) === Float64
+    @test eltype(mixed_work.p) === Float32
+    @test mixed_result[1] ≈ Float64.(mixed_rhs) rtol=1e-7
+
+    first_solution = real_result[1]
+    first_solution_before = copy(first_solution)
+    larger_A = Matrix{Float64}(I, 7, 7)
+    larger_rhs = collect(1.0:7.0)
+    larger_x = zeros(7)
+    larger_work = TTSolver.prepare_bicgstab!(real_cache, larger_x, larger_rhs)
+    TTSolver._bicgstab!(
+        larger_x, (dest, x) -> mul!(dest, larger_A, x),
+        larger_rhs, larger_work; tol=1e-12, maxiter=10,
+    )
+    @test first_solution == first_solution_before
+
+    solved = real_A \ real_rhs
+    restart_work = TTSolver.prepare_bicgstab!(real_cache, solved, real_rhs)
+    real_mv! = (dest, x) -> mul!(dest, real_A, x)
+    @test !TTSolver._needs_local_restart!(
+        restart_work, real_mv!, solved, real_rhs, 1e-12,
+    )
+    perturbed = copy(solved)
+    perturbed[1] += 1e-3
+    @test TTSolver._needs_local_restart!(
+        restart_work, real_mv!, perturbed, real_rhs, 1e-12,
+    )
+
+    @test_throws DimensionMismatch TTSolver.prepare_bicgstab!(
+        real_cache, zeros(2), zeros(3),
+    )
+end

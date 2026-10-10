@@ -412,14 +412,15 @@ function bicgstab(mvfun, b; x0=nothing, tol=1e-6, maxiter=100, M=nothing)
     omega = one(eltype(b))
     v = zeros(eltype(b), n)
     p = zeros(eltype(b), n)
-    res0 = norm(r)
-    if res0 == 0
-        return x, 0, 0.0, 0
+    rhs_norm = norm(b)
+    residual_norm = norm(r)
+    if _bicgstab_converged(residual_norm, rhs_norm, tol)
+        return x, 0, _bicgstab_relres(residual_norm, rhs_norm), 0
     end
     for iter in 1:maxiter
         rho_new = dot(r_hat, r)
         if rho_new == 0
-            return x, 1, norm(r) / res0, iter
+            return x, 1, _bicgstab_relres(norm(r), rhs_norm), iter
         end
         beta = (rho_new / rho) * (alpha / omega)
         p = r + beta * (p - omega * v)
@@ -427,21 +428,21 @@ function bicgstab(mvfun, b; x0=nothing, tol=1e-6, maxiter=100, M=nothing)
         v = mvfun(p_hat)
         alpha = rho_new / dot(r_hat, v)
         s = r - alpha * v
-        if norm(s) < tol * res0
+        if _bicgstab_converged(norm(s), rhs_norm, tol)
             x = x + alpha * p_hat
-            return x, 0, norm(s) / res0, iter
+            return x, 0, _bicgstab_relres(norm(s), rhs_norm), iter
         end
         s_hat = M === nothing ? s : M(s)
         t = mvfun(s_hat)
         omega = dot(t, s) / dot(t, t)
         x = x + alpha * p_hat + omega * s_hat
         r = s - omega * t
-        if norm(r) < tol * res0
-            return x, 0, norm(r) / res0, iter
+        if _bicgstab_converged(norm(r), rhs_norm, tol)
+            return x, 0, _bicgstab_relres(norm(r), rhs_norm), iter
         end
         rho = rho_new
     end
-    return x, 2, norm(r) / res0, maxiter
+    return x, 2, _bicgstab_relres(norm(r), rhs_norm), maxiter
 end
 
 function bicgstab_inplace(mvfun!, b; x0=nothing, tol=1e-6, maxiter=100, M=nothing)
@@ -454,41 +455,75 @@ function bicgstab_inplace(mvfun!, b; x0=nothing, tol=1e-6, maxiter=100, M=nothin
     p = zeros(eltype(bvec), n)
     s = similar(x)
     t = similar(x)
+    work = BiCGSTABWorkspace(r, r_hat, p, v, s, t)
+    return _bicgstab!(x, mvfun!, b, work; tol, maxiter, M)
+end
 
-    mvfun!(v, x)
-    @. r = bvec - v
+function _bicgstab_residual!(work::BiCGSTABWorkspace, mvfun!, x, b)
+    mvfun!(work.v, x)
+    bvec = vec(b)
+    @. work.r = bvec - work.v
+    return work.r
+end
+
+_bicgstab_converged(rnorm, bnorm, tol) =
+    isfinite(rnorm) && isfinite(bnorm) &&
+    (iszero(rnorm) || rnorm < tol * bnorm)
+
+_bicgstab_relres(rnorm, bnorm) =
+    iszero(bnorm) ? (iszero(rnorm) ? 0.0 : Inf) : rnorm / bnorm
+
+function _needs_local_restart!(work::BiCGSTABWorkspace, mvfun!, x, b, tol)
+    residual = _bicgstab_residual!(work, mvfun!, x, b)
+    return !_bicgstab_converged(norm(residual), norm(b), tol)
+end
+
+function _bicgstab!(x, mvfun!, b, work::BiCGSTABWorkspace;
+    initial_residual=nothing, tol=1e-6, maxiter=100, M=nothing)
+    bvec = vec(b)
+    (; r, r_hat, p, v, s, t) = work
+    if initial_residual === nothing
+        _bicgstab_residual!(work, mvfun!, x, b)
+    elseif initial_residual !== r
+        copyto!(r, initial_residual)
+    end
     copyto!(r_hat, r)
     rho = one(eltype(bvec))
     alpha = one(eltype(bvec))
     omega = one(eltype(bvec))
-    res0 = norm(r)
-    if res0 == 0
-        return x, 0, 0.0, 0
+    rhs_norm = norm(bvec)
+    residual_norm = norm(r)
+    if _bicgstab_converged(residual_norm, rhs_norm, tol)
+        return x, 0, _bicgstab_relres(residual_norm, rhs_norm), 0
     end
     for iter in 1:maxiter
         rho_new = dot(r_hat, r)
         if rho_new == 0
-            return x, 1, norm(r) / res0, iter
+            return x, 1, _bicgstab_relres(norm(r), rhs_norm), iter
         end
-        beta = (rho_new / rho) * (alpha / omega)
-        @. p = r + beta * (p - omega * v)
+        if iter == 1
+            copyto!(p, r)
+        else
+            beta = (rho_new / rho) * (alpha / omega)
+            @. p = r + beta * (p - omega * v)
+        end
         p_hat = M === nothing ? p : M(p)
         mvfun!(v, p_hat)
         alpha = rho_new / dot(r_hat, v)
         @. s = r - alpha * v
-        if norm(s) < tol * res0
+        if _bicgstab_converged(norm(s), rhs_norm, tol)
             @. x = x + alpha * p_hat
-            return x, 0, norm(s) / res0, iter
+            return x, 0, _bicgstab_relres(norm(s), rhs_norm), iter
         end
         s_hat = M === nothing ? s : M(s)
         mvfun!(t, s_hat)
         omega = dot(t, s) / dot(t, t)
         @. x = x + alpha * p_hat + omega * s_hat
         @. r = s - omega * t
-        if norm(r) < tol * res0
-            return x, 0, norm(r) / res0, iter
+        if _bicgstab_converged(norm(r), rhs_norm, tol)
+            return x, 0, _bicgstab_relres(norm(r), rhs_norm), iter
         end
         rho = rho_new
     end
-    return x, 2, norm(r) / res0, maxiter
+    return x, 2, _bicgstab_relres(norm(r), rhs_norm), maxiter
 end
