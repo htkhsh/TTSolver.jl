@@ -4,6 +4,11 @@ using SparseArrays
 using Random
 using TTSolver
 
+include("amen_tamen_test_utils.jl")
+include("fixtures/amen_tamen_reference.jl")
+include("amen_optimization_tests.jl")
+include("tamen_optimization_tests.jl")
+
 @testset "tt_round preserves tensor scale" begin
     tolerance = 0.1
 
