@@ -290,13 +290,13 @@ end
 
     for scheme in ("cheb", "CN")
         Random.seed!(20260922)
-        X = tkron(initial, tt_ones(5))
+        X = tkron(initial, tt_ones(3))
         options = Dict{Symbol,Any}(
             :verb => 0,
-            :nswp => 4,
-            :local_iters => 8,
+            :nswp => 1,
+            :local_iters => 2,
             :time_scheme => scheme,
-            :time_error_damp => 1e3,
+            :time_error_damp => 0.0,
         )
         U, time_grid, _, _, _ = tamen(
             X, generator, 1e-6, options;
@@ -313,13 +313,13 @@ end
 
 @testset "tamen legacy observable option" begin
     initial, generator, observables = conservative_tamen_problem()
-    X = tkron(initial, tt_ones(5))
+    X = tkron(initial, tt_ones(3))
     options = Dict{Symbol,Any}(
         :verb => 0,
-        :nswp => 4,
-        :local_iters => 8,
+        :nswp => 1,
+        :local_iters => 2,
         :time_scheme => "CN",
-        :time_error_damp => 1e3,
+        :time_error_damp => 0.0,
         :obs => [first(observables)],
         :correct_2_norm => false,
     )

@@ -5,7 +5,7 @@ using Random
 
 Random.seed!(1234)
 
-println("=== Benchmark: tamen function (型推論改善前) ===\n")
+println("=== Benchmark: fresh and reused TAMEn workspaces ===\n")
 
 # Simple decay ODE benchmark
 function bench_simple_decay()
@@ -17,7 +17,7 @@ function bench_simple_decay()
     X[1, 1] = reshape(core, size(core, 1), size(core, 2), 1, size(core, 3))
     X[2, 1] = reshape(ones(5), 1, 5, 1, 1)
     A = TTMatrix([reshape(-alpha .* Matrix{Float64}(I, n, n), 1, n, n, 1)])
-    opts = Dict(:verb => 0, :nswp => 2, :local_iters => 3, :time_scheme => "cheb", :time_error_damp => 1e3)
+    opts = Dict(:verb => 0, :nswp => 1, :local_iters => 1, :time_scheme => "cheb", :time_error_damp => 0.0)
     return X, A, opts
 end
 
@@ -47,40 +47,54 @@ function bench_larger_ode()
     end
     A = TTMatrix(A_cores)
     
-    opts = Dict(:verb => 0, :nswp => 3, :local_iters => 5, :time_scheme => "cheb", :time_error_damp => 1e3)
+    opts = Dict(:verb => 0, :nswp => 1, :local_iters => 1, :time_scheme => "cheb", :time_error_damp => 0.0)
     return X, A, opts
 end
 
-# Warmup
-println("Warming up...")
-X, A, opts = bench_simple_decay()
-tamen(X, A, 1e-4, copy(opts))
-X, A, opts = bench_larger_ode()
-tamen(X, A, 1e-4, copy(opts))
-println("Warmup complete.\n")
+function benchmark_workspace_case(label, builder; tol=1e-4)
+    X, A, opts = builder()
+    work = TAMEnWorkspace(Float64)
 
-# Benchmark simple decay
-println("--- Simple Decay ODE (1D, n=4, nt=5) ---")
-X, A, opts = bench_simple_decay()
-b1 = @benchmark tamen($X, $A, 1e-4, $(copy(opts))) samples=10 evals=1
-display(b1)
-println("\n")
+    fresh_result = tamen(deepcopy(X), A, tol, copy(opts))
+    reused_result = tamen(
+        deepcopy(X), A, tol, copy(opts); workspace=work,
+    )
+    fresh_norm = norm(tt_full(extract_snapshot(
+        fresh_result[1], fresh_result[2], 1.0, opts[:time_scheme],
+    )))
+    reused_norm = norm(tt_full(extract_snapshot(
+        reused_result[1], reused_result[2], 1.0, opts[:time_scheme],
+    )))
+    @assert isfinite(fresh_norm) && isfinite(reused_norm)
 
-# Benchmark larger ODE
-println("--- Larger ODE (3D, n=4 each, nt=5) ---")
-X, A, opts = bench_larger_ode()
-b2 = @benchmark tamen($X, $A, 1e-4, $(copy(opts))) samples=10 evals=1
-display(b2)
-println("\n")
+    fresh = @benchmark tamen(
+        deepcopy($X), $A, $tol, copy($opts),
+    ) samples=3 evals=1
+    reused = @benchmark tamen(
+        deepcopy($X), $A, $tol, copy($opts); workspace=$work,
+    ) samples=3 evals=1
+    fresh_median = median(fresh)
+    reused_median = median(reused)
 
-# Memory allocation check
-println("--- Memory Allocation Check ---")
-X, A, opts = bench_simple_decay()
-@time tamen(X, A, 1e-4, copy(opts))
-X, A, opts = bench_larger_ode()
-@time tamen(X, A, 1e-4, copy(opts))
+    println("--- $label ---")
+    println("final norm: fresh=$fresh_norm, reused=$reused_norm")
+    println(
+        "fresh: time=$(fresh_median.time / 1e6) ms, " *
+        "memory=$(fresh_median.memory) bytes, " *
+        "allocations=$(fresh_median.allocs)",
+    )
+    println(
+        "reused: time=$(reused_median.time / 1e6) ms, " *
+        "memory=$(reused_median.memory) bytes, " *
+        "allocations=$(reused_median.allocs)",
+    )
+    println()
+    return (; fresh, reused, fresh_norm, reused_norm)
+end
 
-# Save median times for comparison
-println("\n=== Summary ===")
-println("Simple Decay - Median time: $(median(b1).time / 1e6) ms")
-println("Larger ODE - Median time: $(median(b2).time / 1e6) ms")
+simple = benchmark_workspace_case(
+    "Simple Decay ODE (1D, n=4, nt=5)", bench_simple_decay,
+)
+larger = benchmark_workspace_case(
+    "Larger ODE (3D, n=4 each, nt=5)", bench_larger_ode,
+)
