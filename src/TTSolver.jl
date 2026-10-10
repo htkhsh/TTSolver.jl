@@ -24,7 +24,7 @@ export tt_kron, tt_mkron, tt_full, tt_dot, tt_norm
 export tt_round, tt_hadamard
 export check_vector, check_matrix
 export amen_solve
-export chebdiff, cheb2_interpolant, tamen
+export chebdiff, cheb2_interpolant, tamen, TAMEnWorkspace
 export extract_snapshot
 export tt_ksl, expv_full
 

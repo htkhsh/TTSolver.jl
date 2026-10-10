@@ -217,6 +217,25 @@ EnvironmentUpdateWorkspace(::Type{T}) where T = EnvironmentUpdateWorkspace(
     Dict{DataType,Any}(),
 )
 
+"""
+    TAMEnWorkspace(T)
+
+Reusable grow-only scratch storage for sequential `tamen` calls. A workspace
+must not be shared by concurrent or nested solves. Returned solutions own their
+storage and do not borrow these buffers.
+"""
+struct TAMEnWorkspace{T}
+    matvec::AmenMatvecCaches{T}
+    environment::EnvironmentUpdateWorkspace{T}
+    bicgstab::BiCGSTABCache{T,T}
+end
+
+TAMEnWorkspace(::Type{T}) where T = TAMEnWorkspace(
+    AmenMatvecCaches(T),
+    EnvironmentUpdateWorkspace(T),
+    BiCGSTABCache(T),
+)
+
 _environment_buffers(work::EnvironmentUpdateWorkspace{T}, ::Type{T}) where T =
     work.buffers
 

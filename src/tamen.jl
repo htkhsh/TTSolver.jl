@@ -177,10 +177,12 @@ end
 
 `conserved_observables` is a keyword-only array of `TTTensor` vectors whose
 contractions are preserved by the solve.  `correct_2_norm` controls the legacy
-Euclidean-norm correction and defaults to the value in `opts` (or `true`).
+Euclidean-norm correction and defaults to the value in `opts` (or `true`). Pass
+a `TAMEnWorkspace` to reuse scratch storage across sequential solves.
 """
 function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing;
-    conserved_observables=nothing, correct_2_norm=nothing)
+    conserved_observables=nothing, correct_2_norm=nothing,
+    workspace::Union{Nothing,TAMEnWorkspace}=nothing)
     d, n, _, rx, vectype = check_vector(X, "x")
     d -= 1
 
@@ -313,6 +315,10 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing;
     time_global = 0.0
     t_cnt = 0
     time_resid = 0.0
+    work = workspace === nothing ? TAMEnWorkspace(eltype(X[1, 1])) : workspace
+    matvec_caches = work.matvec
+    environment_workspace = work.environment
+    bicgstab_cache = work.bicgstab
 
     while time_global < 1.0
         if time_global + time_step > 1.0
@@ -374,7 +380,10 @@ function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing;
             # Note: ZAX and ZY are reused across sweeps for efficiency.
             # The amenany_sweep function handles dimension changes internally.
 
-            X, rx, z, ZAX, ZY, opts, errs, resids, XAX, XY, XAUX = amenany_sweep(X, As, x0rhs, z, tol, opts, ZAX, ZY, Aux)
+            X, rx, z, ZAX, ZY, opts, errs, resids, XAX, XY, XAUX = amenany_sweep(
+                X, As, x0rhs, z, tol, opts, ZAX, ZY, Aux;
+                matvec_caches, environment_workspace, bicgstab_cache,
+            )
             max_err = maximum(errs)
             max_res = maximum(resids)
 
