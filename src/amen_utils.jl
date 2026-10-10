@@ -34,98 +34,6 @@ function orthogonalise_block(x_next, x, dir::Integer)
     end
 end
 
-function leftreduce_vector(WX1::AbstractVector, w::AbstractArray, x::AbstractVector)
-    WX2 = copy(WX1)
-    rw1, n, _, rw2 = size(w)
-    wc = reshape(w, rw1, n * rw2)
-    for k in eachindex(x)
-        rx1, _, _, rx2 = size(x[k])
-        tmp = wc' * WX2[k]
-        tmp = reshape(tmp, n, rw2 * rx1)
-        tmp = permutedims(tmp, (2, 1))
-        tmp = reshape(tmp, rw2, rx1 * n)
-        xk = reshape(x[k], rx1 * n, rx2)
-        WX2[k] = tmp * xk
-    end
-    return WX2
-end
-
-function leftreduce_matrix(WAX1::AbstractVector, w::AbstractArray, A::AbstractVector, x::AbstractArray)
-    WAX2 = copy(WAX1)
-    rx1, m, _, rx2 = size(x)
-    rw1, n, _, rw2 = size(w)
-    wc = reshape(w, rw1, n * rw2)
-    xc = reshape(x, rx1 * m, rx2)
-    for k in eachindex(A)
-        ra1 = size(WAX1[k], 3)
-        tmp = reshape(WAX2[k], rw1, rx1 * ra1)
-        tmp = wc' * tmp
-        tmp = reshape(tmp, n, rw2 * rx1 * ra1)
-        tmp = permutedims(tmp, (2, 1))
-        tmp = reshape(tmp, rw2 * rx1, ra1 * n)
-        Ak = reshape(A[k], ra1 * n, :)
-        tmp = tmp * Ak
-        tmp = reshape(tmp, rw2, :)
-        tmp = permutedims(tmp, (2, 1))
-        tmp = reshape(tmp, rx1 * m, :)
-        tmp = transpose(xc) * tmp
-        tmp = reshape(tmp, :, rw2)
-        tmp = permutedims(tmp, (2, 1))
-        WAX2[k] = reshape(tmp, rw2, rx2, :)
-    end
-    return WAX2
-end
-
-function rightreduce_vector(WX2::AbstractVector, w::AbstractArray, x::AbstractVector)
-    WX1 = copy(WX2)
-    rw1, n, _, rw2 = size(w)
-    wc = reshape(w, rw1, n * rw2)
-    for k in eachindex(x)
-        rx1, _, _, rx2 = size(x[k])
-        tmp = reshape(x[k], rx1 * n, rx2)
-        tmp = tmp * transpose(WX1[k])
-        tmp = reshape(tmp, rx1, n * rw2)
-        WX1[k] = permutedims(tmp * wc', (2, 1))
-    end
-    return WX1
-end
-
-function rightreduce_matrix(WAX2::AbstractVector, w::AbstractArray, A::AbstractVector, x::AbstractArray)
-    WAX1 = copy(WAX2)
-    rw1, n, _, rw2 = size(w)
-    wc = reshape(conj.(w), rw1, n * rw2)
-    rx1, m, _, rx2 = size(x)
-    xc = reshape(x, rx1 * m, rx2)
-    for k in eachindex(A)
-        rw2_k, rx2_k, ra2 = size(WAX2[k])
-        if ndims(A[k]) == 2
-            ra1 = size(A[k], 1) ÷ n
-            m_k = size(A[k], 2) ÷ ra2
-            m_k == m || error("mode size mismatch in rightreduce_matrix")
-        else
-            ra1 = size(A[k], 1)
-            n = size(A[k], 2)
-            m_k = size(A[k], 3)
-            ra2 = size(A[k], 4)
-        end
-        wx = reshape(permutedims(WAX2[k], (2, 1, 3)), rx2_k, rw2_k * ra2)
-        tmp = xc * wx
-        tmp = reshape(tmp, rx1, m_k, rw2_k, ra2)
-        tmp = permutedims(tmp, (2, 4, 3, 1))
-        tmp = reshape(tmp, m_k * ra2, rw2_k * rx1)
-        Ak = reshape(A[k], :, m_k * ra2)
-        tmp = Ak * tmp
-        tmp = reshape(tmp, ra1, n, rw2_k, rx1)
-        tmp = permutedims(tmp, (2, 3, 1, 4))
-        tmp = reshape(tmp, n * rw2_k, ra1 * rx1)
-        tmp = wc * tmp
-        tmp = reshape(tmp, rw1, ra1, rx1)
-        tmp = permutedims(tmp, (1, 3, 2))
-        WAX1[k] = tmp
-    end
-    return WAX1
-end
-
 struct LocalMatvecWorkspace{T,TA,TM<:AbstractMatrix{T}}
     rx1::Int
     m::Int
@@ -224,6 +132,259 @@ end
 
 _matvec_matrix!(buffer, rows, columns) =
     reshape(_matvec_storage!(buffer, rows * columns), rows, columns)
+
+struct EnvironmentUpdateBuffers{T}
+    first::LocalMatvecBuffer{T}
+    second::LocalMatvecBuffer{T}
+    conjugate::LocalMatvecBuffer{T}
+    w_input::LocalMatvecBuffer{T}
+    x_input::LocalMatvecBuffer{T}
+    a_input::LocalMatvecBuffer{T}
+    env_input::LocalMatvecBuffer{T}
+end
+
+EnvironmentUpdateBuffers(::Type{T}) where T =
+    EnvironmentUpdateBuffers(ntuple(_ -> LocalMatvecBuffer(T), 7)...)
+
+"""Grow-only scratch for one sequential stream of environment updates."""
+struct EnvironmentUpdateWorkspace{T}
+    buffers::EnvironmentUpdateBuffers{T}
+    other_types::Dict{DataType,Any}
+end
+
+EnvironmentUpdateWorkspace(::Type{T}) where T = EnvironmentUpdateWorkspace(
+    EnvironmentUpdateBuffers(T),
+    Dict{DataType,Any}(),
+)
+
+_environment_buffers(work::EnvironmentUpdateWorkspace{T}, ::Type{T}) where T =
+    work.buffers
+
+function _environment_buffers(work::EnvironmentUpdateWorkspace, ::Type{T}) where T
+    return get!(work.other_types, T) do
+        EnvironmentUpdateBuffers(T)
+    end::EnvironmentUpdateBuffers{T}
+end
+
+function _environment_array!(work, ::Type{T}, slot, dims...) where T
+    buffer = getfield(_environment_buffers(work, T), slot)
+    return reshape(_matvec_storage!(buffer, prod(dims)), dims...)
+end
+
+_environment_matprod(a, b) = a * b + a * b
+
+_environment_product_type(::Type{T}, ::Type{S}) where {T,S} =
+    Base.promote_op(_environment_matprod, T, S)
+
+function _environment_input!(work, slot, matrix)
+    if matrix isa SparseArrays.AbstractSparseMatrix ||
+        (matrix isa StridedMatrix && stride(matrix, 1) == 1)
+        return matrix
+    end
+    packed = _environment_array!(work, eltype(matrix), slot, size(matrix)...)
+    copyto!(packed, matrix)
+    return packed
+end
+
+function _environment_core_size(core)
+    ndims(core) == 4 && size(core, 3) == 1 ||
+        throw(DimensionMismatch(
+            "environment updates require a rank-one block dimension",
+        ))
+    return size(core, 1), size(core, 2), size(core, 4)
+end
+
+function _environment_operator(A, n, m, rank, left)
+    if ndims(A) == 2
+        ra1, rem1 = divrem(size(A, 1), n)
+        ra2, rem2 = divrem(size(A, 2), m)
+        rem1 == rem2 == 0 ||
+            throw(DimensionMismatch("operator mode sizes mismatch"))
+    elseif ndims(A) == 4
+        ra1, an, am, ra2 = size(A)
+        (an, am) == (n, m) ||
+            throw(DimensionMismatch("operator mode sizes mismatch"))
+    else
+        throw(DimensionMismatch("operator must have two or four dimensions"))
+    end
+    (left ? ra1 : ra2) == rank ||
+        throw(DimensionMismatch("operator environment rank mismatch"))
+    return reshape(A, ra1 * n, m * ra2), ra1, ra2
+end
+
+function leftreduce_matrix!(dest, src, w, A, x,
+    work::EnvironmentUpdateWorkspace)
+    length(dest) == length(src) == length(A) ||
+        throw(DimensionMismatch("environment term counts differ"))
+    wl, n, wr = _environment_core_size(w)
+    xl, m, xr = _environment_core_size(x)
+    wc = _environment_input!(work, :w_input, reshape(w, wl, n * wr))
+    xc = _environment_input!(work, :x_input, reshape(x, xl * m, xr))
+    for k in eachindex(A)
+        dest[k] = _leftreduce_matrix_term!(
+            work, wc, xc, src[k], A[k], wl, n, wr, xl, m, xr,
+        )
+    end
+    return dest
+end
+
+function _leftreduce_matrix_term!(work, wc, xc, source, operator,
+    wl, n, wr, xl, m, xr)
+    p = size(source, 3)
+    size(source) == (wl, xl, p) ||
+        throw(DimensionMismatch("left environment size mismatch"))
+    Ak, _, q = _environment_operator(operator, n, m, p, true)
+    Ak = _environment_input!(work, :a_input, Ak)
+    env = _environment_input!(work, :env_input, reshape(source, wl, xl * p))
+    T1 = _environment_product_type(eltype(wc), eltype(env))
+    a = _environment_array!(work, T1, :first, n * wr, xl * p)
+    mul!(a, adjoint(wc), env)
+    b = _environment_array!(work, T1, :second, wr * xl * p, n)
+    permutedims!(b, reshape(a, n, wr * xl * p), (2, 1))
+    T2 = _environment_product_type(T1, eltype(Ak))
+    a = _environment_array!(work, T2, :first, wr * xl, m * q)
+    mul!(a, reshape(b, wr * xl, p * n), Ak)
+    b = _environment_array!(work, T2, :second, xl * m * q, wr)
+    permutedims!(b, reshape(a, wr, xl * m * q), (2, 1))
+    T3 = _environment_product_type(eltype(xc), T2)
+    a = _environment_array!(work, T3, :first, xr, q * wr)
+    mul!(a, transpose(xc), reshape(b, xl * m, q * wr))
+    output = Array{T3}(undef, wr, xr, q)
+    permutedims!(
+        reshape(output, wr, xr * q),
+        reshape(a, xr * q, wr),
+        (2, 1),
+    )
+    return output
+end
+
+function rightreduce_matrix!(dest, src, w, A, x,
+    work::EnvironmentUpdateWorkspace)
+    length(dest) == length(src) == length(A) ||
+        throw(DimensionMismatch("environment term counts differ"))
+    wl, n, wr = _environment_core_size(w)
+    xl, m, xr = _environment_core_size(x)
+    wc = _environment_array!(work, eltype(w), :conjugate, wl, n * wr)
+    wc .= conj.(reshape(w, wl, n * wr))
+    xc = _environment_input!(work, :x_input, reshape(x, xl * m, xr))
+    for k in eachindex(A)
+        dest[k] = _rightreduce_matrix_term!(
+            work, wc, xc, src[k], A[k], wl, n, wr, xl, m, xr,
+        )
+    end
+    return dest
+end
+
+function _rightreduce_matrix_term!(work, wc, xc, source, operator,
+    wl, n, wr, xl, m, xr)
+    q = size(source, 3)
+    size(source) == (wr, xr, q) ||
+        throw(DimensionMismatch("right environment size mismatch"))
+    Ak, p, _ = _environment_operator(operator, n, m, q, false)
+    Ak = _environment_input!(work, :a_input, Ak)
+    b = _environment_array!(work, eltype(source), :second, xr, wr, q)
+    permutedims!(b, source, (2, 1, 3))
+    T1 = _environment_product_type(eltype(xc), eltype(b))
+    a = _environment_array!(work, T1, :first, xl * m, wr * q)
+    mul!(a, xc, reshape(b, xr, wr * q))
+    b = _environment_array!(work, T1, :second, m, q, wr, xl)
+    permutedims!(b, reshape(a, xl, m, wr, q), (2, 4, 3, 1))
+    T2 = _environment_product_type(eltype(Ak), T1)
+    a = _environment_array!(work, T2, :first, p * n, wr * xl)
+    mul!(a, Ak, reshape(b, m * q, wr * xl))
+    b = _environment_array!(work, T2, :second, n, wr, p, xl)
+    permutedims!(b, reshape(a, p, n, wr, xl), (2, 3, 1, 4))
+    T3 = _environment_product_type(eltype(wc), T2)
+    a = _environment_array!(work, T3, :first, wl, p * xl)
+    mul!(a, wc, reshape(b, n * wr, p * xl))
+    output = Array{T3}(undef, wl, xl, p)
+    permutedims!(output, reshape(a, wl, p, xl), (1, 3, 2))
+    return output
+end
+
+function leftreduce_vector!(dest, src, w, xs,
+    work::EnvironmentUpdateWorkspace)
+    length(dest) == length(src) == length(xs) ||
+        throw(DimensionMismatch("environment term counts differ"))
+    wl, n, wr = _environment_core_size(w)
+    wc = _environment_input!(work, :w_input, reshape(w, wl, n * wr))
+    for k in eachindex(xs)
+        dest[k] = _leftreduce_vector_term!(
+            work, wc, src[k], xs[k], wl, n, wr,
+        )
+    end
+    return dest
+end
+
+function _leftreduce_vector_term!(work, wc, source, core, wl, n, wr)
+    xl, xn, xr = _environment_core_size(core)
+    xn == n && size(source) == (wl, xl) ||
+        throw(DimensionMismatch("left vector environment size mismatch"))
+    xc = _environment_input!(work, :x_input, reshape(core, xl * n, xr))
+    env = _environment_input!(work, :env_input, source)
+    T1 = _environment_product_type(eltype(wc), eltype(env))
+    a = _environment_array!(work, T1, :first, n * wr, xl)
+    mul!(a, adjoint(wc), env)
+    b = _environment_array!(work, T1, :second, wr * xl, n)
+    permutedims!(b, reshape(a, n, wr * xl), (2, 1))
+    T2 = _environment_product_type(T1, eltype(xc))
+    output = Matrix{T2}(undef, wr, xr)
+    mul!(output, reshape(b, wr, xl * n), xc)
+    return output
+end
+
+function rightreduce_vector!(dest, src, w, xs,
+    work::EnvironmentUpdateWorkspace)
+    length(dest) == length(src) == length(xs) ||
+        throw(DimensionMismatch("environment term counts differ"))
+    wl, n, wr = _environment_core_size(w)
+    wc = _environment_input!(work, :w_input, reshape(w, wl, n * wr))
+    for k in eachindex(xs)
+        dest[k] = _rightreduce_vector_term!(
+            work, wc, src[k], xs[k], wl, n, wr,
+        )
+    end
+    return dest
+end
+
+function _rightreduce_vector_term!(work, wc, source, core, wl, n, wr)
+    xl, xn, xr = _environment_core_size(core)
+    xn == n && size(source) == (wr, xr) ||
+        throw(DimensionMismatch("right vector environment size mismatch"))
+    xc = _environment_input!(work, :x_input, reshape(core, xl * n, xr))
+    env = _environment_input!(work, :env_input, source)
+    T1 = _environment_product_type(eltype(xc), eltype(env))
+    a = _environment_array!(work, T1, :first, xl * n, wr)
+    mul!(a, xc, transpose(env))
+    T2 = _environment_product_type(T1, eltype(wc))
+    b = _environment_array!(work, T2, :second, xl, wl)
+    mul!(b, reshape(a, xl, n * wr), adjoint(wc))
+    output = Matrix{T2}(undef, wl, xl)
+    permutedims!(output, b, (2, 1))
+    return output
+end
+
+leftreduce_matrix(src::AbstractVector, w::AbstractArray,
+    A::AbstractVector, x::AbstractArray) =
+    leftreduce_matrix!(
+        copy(src), src, w, A, x, EnvironmentUpdateWorkspace(eltype(w)),
+    )
+
+rightreduce_matrix(src::AbstractVector, w::AbstractArray,
+    A::AbstractVector, x::AbstractArray) =
+    rightreduce_matrix!(
+        copy(src), src, w, A, x, EnvironmentUpdateWorkspace(eltype(w)),
+    )
+
+leftreduce_vector(src::AbstractVector, w::AbstractArray, xs::AbstractVector) =
+    leftreduce_vector!(
+        copy(src), src, w, xs, EnvironmentUpdateWorkspace(eltype(w)),
+    )
+
+rightreduce_vector(src::AbstractVector, w::AbstractArray, xs::AbstractVector) =
+    rightreduce_vector!(
+        copy(src), src, w, xs, EnvironmentUpdateWorkspace(eltype(w)),
+    )
 
 """
     prepare_local_matvec!(cache, x, rx1, m, rx2, b, rw1, n, rw2,
