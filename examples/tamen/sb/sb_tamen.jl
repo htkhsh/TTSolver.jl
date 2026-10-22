@@ -22,10 +22,10 @@ end
 # Parameters
 nb = 6
 nt = 3
-tol = 1e-4
+tol = 1e-3
 Tfin = 10.0
-dt = 0.05
-Nsteps = 200
+dt = 0.1
+Nsteps = 100
 
 sigma_z = ComplexF64[1 0; 0 -1]
 sigma_x = ComplexF64[0 1; 1 0]
@@ -53,15 +53,7 @@ H_full =
     ω * kron(id2, Matrix{ComplexF64}(n_op)) +
     g * kron(sigma_z, Matrix{ComplexF64}(x_op))
 
-opts = Dict(
-    :verb => 1,
-    :nswp => 2,
-    :local_iters => 5,
-    :time_scheme => "cn",
-    :time_error_damp => 10.0,
-    :kickrank => 4,
-    :correct_2_norm => true,
-)
+time_scheme = "cn"
 
 # tt_unit([2, nb], [1, 1]) gives |↑, 0⟩ with kron-compatible ordering
 x0 = tt_unit([2, nb], [1, 1]; T=ComplexF64)
@@ -87,13 +79,23 @@ norm_tt[1] = sum(abs2, psi_tt[1])
 println("Running tAMEn time evolution...")
 println("Parameters: nb=$nb, nt=$nt, dt=$dt, Tfin=$Tfin, g=$g")
 
-scheme = String(opts[:time_scheme])
+workspace = TAMEnWorkspace(ComplexF64)
 let u = x0
     for i in 2:length(ts)
         A_step = dt * A
         U = tkron(u, tt_ones(nt; T=ComplexF64))
-        U, tgrid, _, _ = tamen(U, A_step, tol, opts)
-        u = extract_snapshot(U, tgrid, 1.0, scheme)
+        U, tgrid, _, _, _ = tamen(
+            U, A_step, tol;
+            verb=1,
+            nswp=2,
+            local_iters=5,
+            time_scheme=time_scheme,
+            time_error_damp=10.0,
+            kickrank=4,
+            correct_2_norm=true,
+            workspace=workspace,
+        )
+        u = extract_snapshot(U, tgrid, 1.0, time_scheme)
         norm_tt[i] = real(dot(u, u))
         psi_tt[i] = vec(tt_full(u))
         psi_exact[i] = exp(-1im * H_full * ts[i]) * psi0

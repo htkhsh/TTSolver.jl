@@ -56,7 +56,7 @@ end
     plot_norm_conservation(ts, norm_exact, norm_tt;
                            method="TT", filename=nothing)
 
-Plot norm conservation comparing exact and TT solutions.
+Plot absolute norm error on a logarithmic scale.
 
 # Arguments
 - `ts`: Time array
@@ -75,12 +75,18 @@ function plot_norm_conservation(
     fig = Figure(size=(600, 400))
     ax = Axis(fig[1, 1];
         xlabel="t",
-        ylabel="Norm",
-        title="Norm Conservation"
+        ylabel="|Norm - 1|",
+        title="Norm Conservation Error (log scale)",
+        yscale=log10,
     )
 
-    lines!(ax, ts, norm_exact; label="exact", linewidth=2, color=:blue)
-    lines!(ax, ts, norm_tt; label=method, linewidth=2, linestyle=:dash, color=:orange)
+    # A logarithmic axis cannot display exact zeros.  Clip only the plotted
+    # values; the original norms remain unchanged in the saved data.
+    floor = eps(Float64)
+    exact_error = max.(abs.(norm_exact .- 1), floor)
+    tt_error = max.(abs.(norm_tt .- 1), floor)
+    lines!(ax, ts, exact_error; label="exact", linewidth=2, color=:blue)
+    lines!(ax, ts, tt_error; label=method, linewidth=2, linestyle=:dash, color=:orange)
 
     axislegend(ax; position=:rt)
 

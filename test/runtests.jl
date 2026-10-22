@@ -227,6 +227,32 @@ function keyword_tamen_problem()
     return space_time, generator, observable, options
 end
 
+@testset "tamen keyword-only options API" begin
+    X, A, observable, _ = keyword_tamen_problem()
+    workspace = TAMEnWorkspace(Float64)
+
+    result = tamen(
+        X, A, 1e-5;
+        nswp=1,
+        kickrank=4,
+        verb=0,
+        local_iters=2,
+        trunc_norm="fro",
+        time_error_damp=100.0,
+        time_scheme="CN",
+        correct_2_norm=false,
+        conserved_observables=[observable],
+        rhs=nothing,
+        workspace=workspace,
+    )
+
+    @test length(result) == 5
+    final_state = extract_snapshot(result[1], result[2], 1.0, "CN")
+    initial_state = TTTensor([copy(X.cores[1])])
+    @test tt_dot(observable, final_state) ≈
+          tt_dot(observable, initial_state) atol=2e-5
+end
+
 @testset "tamen conserved-observable keyword validation" begin
     X, A, observable, options = keyword_tamen_problem()
 

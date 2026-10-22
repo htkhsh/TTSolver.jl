@@ -173,14 +173,108 @@ function _normalize_conserved_observables(observables, dimensions::Vector{Int})
     return normalized
 end
 
-"""Solve a time-dependent TT linear system with optional conserved observables.
+"""Validated keyword configuration for the public `tamen` API."""
+struct TAMEnOptions
+    nswp
+    kickrank
+    verb
+    local_iters
+    trunc_norm
+    time_error_damp
+    time_scheme
+    correct_2_norm::Bool
+    rhs
+end
+
+function _tamen_options(;
+    nswp=20,
+    kickrank=4,
+    verb=1,
+    local_iters=100,
+    trunc_norm="fro",
+    time_error_damp=100,
+    time_scheme="cheb",
+    correct_2_norm::Bool=true,
+    rhs=nothing,
+)
+    TAMEnOptions(
+        nswp,
+        kickrank,
+        verb,
+        local_iters,
+        trunc_norm,
+        time_error_damp,
+        time_scheme,
+        correct_2_norm,
+        rhs,
+    )
+end
+
+function _tamen_options_dict(options::TAMEnOptions)
+    Dict{Symbol,Any}(
+        :nswp => options.nswp,
+        :kickrank => options.kickrank,
+        :verb => options.verb,
+        :local_iters => options.local_iters,
+        :trunc_norm => options.trunc_norm,
+        :time_error_damp => options.time_error_damp,
+        :time_scheme => options.time_scheme,
+        :correct_2_norm => options.correct_2_norm,
+        :rhs => options.rhs,
+    )
+end
+
+"""Solve a time-dependent TT linear system using keyword-only configuration.
 
 `conserved_observables` is a keyword-only array of `TTTensor` vectors whose
-contractions are preserved by the solve.  `correct_2_norm` controls the legacy
-Euclidean-norm correction and defaults to the value in `opts` (or `true`). Pass
-a `TAMEnWorkspace` to reuse scratch storage across sequential solves.
+contractions are preserved by the solve. `correct_2_norm` controls Euclidean
+norm correction. Pass a `TAMEnWorkspace` to reuse scratch storage across
+sequential solves.
 """
-function tamen(X, A, tol, opts=Dict{Symbol,Any}(), z=nothing;
+function tamen(X, A, tol;
+    z=nothing,
+    nswp=20,
+    kickrank=4,
+    verb=1,
+    local_iters=100,
+    trunc_norm="fro",
+    time_error_damp=100,
+    time_scheme="cheb",
+    correct_2_norm::Bool=true,
+    conserved_observables=nothing,
+    rhs=nothing,
+    workspace::Union{Nothing,TAMEnWorkspace}=nothing)
+    options = _tamen_options(;
+        nswp,
+        kickrank,
+        verb,
+        local_iters,
+        trunc_norm,
+        time_error_damp,
+        time_scheme,
+        correct_2_norm,
+        rhs,
+    )
+    _tamen_impl(
+        X, A, tol, _tamen_options_dict(options), z;
+        conserved_observables,
+        workspace,
+    )
+end
+
+"""Compatibility wrapper for the legacy dictionary-based `tamen` API."""
+function tamen(X, A, tol, opts::AbstractDict, z=nothing;
+    conserved_observables=nothing, correct_2_norm=nothing,
+    workspace::Union{Nothing,TAMEnWorkspace}=nothing)
+    _tamen_impl(
+        X, A, tol, opts, z;
+        conserved_observables,
+        correct_2_norm,
+        workspace,
+    )
+end
+
+function _tamen_impl(X, A, tol, opts, z=nothing;
     conserved_observables=nothing, correct_2_norm=nothing,
     workspace::Union{Nothing,TAMEnWorkspace}=nothing)
     d, n, _, rx, vectype = check_vector(X, "x")
