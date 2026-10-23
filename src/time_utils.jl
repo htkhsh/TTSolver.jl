@@ -37,7 +37,7 @@ function _cheb2_interpolant_dense(x::AbstractVector, y::AbstractVector, nloc::In
     x0 = reshape(x0, 1, n)
 
     x_test = reshape(x, 1, n)
-    w = w .* (x0 .- x_test)
+    w = reshape(w, 1, n) .* (x0 .- x_test)
 
     x_edges = x[nloc:nloc:n]
     ind = vec(sum(y .> x_edges', dims=2))

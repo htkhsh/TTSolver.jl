@@ -44,6 +44,16 @@ const TAMEN_CHEB_REFERENCE = [
     [0.6790522347872915, 0.3209477652127087],
 ]
 
+# The historical Chebyshev snapshots above include incorrect interpolation
+# weights. This independent reference uses exact rational collocation for
+# p' = 1/10 - 3p/10, p(0) = 4/5 at nodes [1/4, 3/4, 1], followed by
+# degree-two interpolation at [0, 1/2, 1]. It is not from REFERENCE_COMMIT.
+const TAMEN_CHEB_COLLOCATION_REFERENCE = [
+    Float64.([495//619, 124//619]),
+    Float64.([455//619, 164//619]),
+    Float64.([1261//1857, 596//1857]),
+]
+
 const TAMEN_CN_REFERENCE = [
     [0.8000000000000002, 0.20000000000000007],
     [0.7348837209302327, 0.26511627906976754],

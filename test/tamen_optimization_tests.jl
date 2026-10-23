@@ -1,6 +1,6 @@
-@testset "pre-migration TAMEn reference" begin
+@testset "TAMEn collocation and legacy CN references" begin
     Random.seed!(20261010)
-    @test maximum(relative_l2.(run_tamen("cheb"), TAMEN_CHEB_REFERENCE)) <=
+    @test maximum(relative_l2.(run_tamen("cheb"), TAMEN_CHEB_COLLOCATION_REFERENCE)) <=
           10eps(Float64)
 
     Random.seed!(20261010)
@@ -87,7 +87,7 @@ end
 @testset "TAMEn workspace accuracy and ownership" begin
     work = TAMEnWorkspace(Float64)
     for scheme in ("cheb", "CN")
-        reference = scheme == "cheb" ? TAMEN_CHEB_REFERENCE : TAMEN_CN_REFERENCE
+        reference = scheme == "cheb" ? TAMEN_CHEB_COLLOCATION_REFERENCE : TAMEN_CN_REFERENCE
 
         Random.seed!(20261010)
         first_result = run_tamen_result(

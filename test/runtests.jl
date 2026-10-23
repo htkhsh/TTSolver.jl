@@ -4,6 +4,7 @@ using SparseArrays
 using Random
 using TTSolver
 
+include("time_interpolation_tests.jl")
 include("amen_tamen_test_utils.jl")
 include("fixtures/amen_tamen_reference.jl")
 include("amen_optimization_tests.jl")
